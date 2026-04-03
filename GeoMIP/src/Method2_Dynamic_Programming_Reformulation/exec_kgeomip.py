@@ -17,7 +17,6 @@ Ejecutar desde GeoMIP/src/Method2_Dynamic_Programming_Reformulation/:
 
 from src.models.base.application import aplicacion
 from src.controllers.manager import Manager
-from src.controllers.strategies.geometric import GeometricSIA
 from src.controllers.strategies.kgeomip import KGeoMIP, stirling2
 
 import numpy as np
@@ -41,13 +40,8 @@ def main():
     aplicacion.profiler_habilitado = False
     aplicacion.pagina_sample_network = "A"
 
-    # ── Referencia: GeoMIP original ────────────────────────────────────────
-    sep("GeoMIP original (referencia, corte asimétrico)")
     tpm_3 = cargar_tpm("N3A.csv")
     est = "000"; cond = alc = mec = "111"
-    sol_geo = GeometricSIA(Manager(est)).aplicar_estrategia(cond, alc, mec, tpm_3)
-    print(sol_geo)
-    print(f"  → φ GeoMIP (corte asimétrico) = {sol_geo.perdida:.4f}")
 
     # ── N3A: KGeoMIP k=2,3 ────────────────────────────────────────────────
     sep("N3A · KGeoMIP k=2 (IIT estricto)")
@@ -60,8 +54,7 @@ def main():
     sol_k3 = KGeoMIP(Manager(est), k=3).aplicar_estrategia(cond, alc, mec, tpm_3)
     print(sol_k3)
 
-    print(f"\n  φ GeoMIP (ref)  = {sol_geo.perdida:.4f}  (corte asimétrico)")
-    print(f"  φ KGeoMIP k=2   = {sol_k2.perdida:.4f}  (IIT estricto)")
+    print(f"\n  φ KGeoMIP k=2   = {sol_k2.perdida:.4f}  (IIT estricto)")
     print(f"  φ KGeoMIP k=3   = {sol_k3.perdida:.4f}  (IIT estricto)")
     print(f"  Nota: φ puede crecer con k (no hay monotonía garantizada con esta métrica)")
 
@@ -78,7 +71,6 @@ def main():
         print(sol)
 
     sep("Resumen")
-    print(f"  N3A  GeoMIP:  φ = {sol_geo.perdida:.4f}  (corte asimétrico, referencia)")
     print(f"  N3A  k=2:     φ = {sol_k2.perdida:.4f}  t = {sol_k2.tiempo_ejecucion:.4f}s")
     print(f"  N3A  k=3:     φ = {sol_k3.perdida:.4f}  t = {sol_k3.tiempo_ejecucion:.4f}s")
     for k_val in [2, 3, 4]:

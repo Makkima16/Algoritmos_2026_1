@@ -1,7 +1,5 @@
 from src.constants.base import ACTIVOS, INACTIVOS
-from src.models.enums.distance import MetricDistance
 from src.models.enums.notation import Notation
-
 
 class Application:
     """
@@ -13,13 +11,13 @@ class Application:
         self.semilla_numpy = 73
         self.notacion: str = Notation.LIL_ENDIAN.value
         self.modo_estados = ACTIVOS
-        self.distancia_metrica = MetricDistance.EMD_EFECTO.value
+        self.distancia_metrica = "emd-effect"
         self.profiler_habilitado = True
 
     def set_notacion(self, tipo: Notation):
         self.notacion = tipo
 
-    def set_distancia(self, tipo: MetricDistance):
+    def set_distancia(self, tipo: str):
         self.distancia_metrica = tipo
 
     def set_estados_activos(self):

@@ -14,9 +14,9 @@ KGeoMIP generaliza esto a k partes (k ≥ 2):
 
     δₖ(V, {S1,...,Sk}) = EMD( P(Vt+1|Vt),  ⊗ᵢ P(Si,t+1|Si,t) )
 
-La tabla de costos de transiciones entre estados (calculada exactamente igual
-que en GeometricSIA) **no cambia con k** — se reutiliza íntegramente. Lo que
-cambia es la forma de generar y evaluar las k-particiones candidatas.
+La tabla de costos de transiciones entre estados se calcula internamente 
+y se utiliza para optimizar la búsqueda de las subparticiones de manera 
+idéntica a como lo haría una iteración base de GeoMIP generalizado.
 
 Estrategia de búsqueda implementada
 -------------------------------------
@@ -34,15 +34,15 @@ Para n·k > UMBRAL_EXHAUSTIVO:
 
 Reutilización de infraestructura
 ---------------------------------
-- Hereda de SIA (igual que GeometricSIA).
+- Hereda de SIA.
 - Llama a `sia_preparar_subsistema` para obtener el subsistema condicionado.
-- Comparte la función de costo y la tabla de transiciones con GeometricSIA.
+- Implementa una tabla de transiciones para optimizar búsquedas.
 - Usa `System.bipartir()` y `System.distribucion_marginal()` del framework.
 
 Complejidad
 -----------
 Exhaustiva : O(S(n,k) · k · 2ⁿ) donde S(n,k) = número de Stirling
-Greedy     : O((k-1) · n · 2ⁿ)  — k-1 llamadas a GeometricSIA
+Greedy     : O((k-1) · n · 2ⁿ)  — k-1 llamadas a sub-partición
 """
 
 import time
@@ -53,7 +53,6 @@ from typing import List, Tuple, Dict, Optional
 import numpy as np
 
 from src.controllers.manager import Manager
-from src.controllers.strategies.geometric import GeometricSIA
 from src.funcs.base import emd_efecto, ABECEDARY, LOWER_ABECEDARY
 from src.funcs.format import fmt_biparte_q
 from src.middlewares.slogger import SafeLogger
@@ -67,7 +66,6 @@ from src.constants.base import (
     TYPE_TAG,
     VOID_STR,
 )
-from src.constants.models import GEOMETRIC_STRAREGY_TAG
 
 
 # ── Constantes propias de KGeoMIP ──────────────────────────────────────────
@@ -76,8 +74,8 @@ KGEOMIP_STRATEGY_TAG: str = f"{KGEOMIP_LABEL}_strategy"
 KGEOMIP_ANALYSIS_TAG: str = f"{KGEOMIP_LABEL}_analysis"
 
 # Si n * k supera este umbral se usa la heurística greedy en lugar de fuerza
-# bruta sobre k-particiones.  Valor empírico: 30 cubre n≤10, k≤3 exactamente.
-UMBRAL_EXHAUSTIVO: int = 30
+# bruta sobre k-particiones. Se ajustó a 10 para evitar la explosión combinatoria.
+UMBRAL_EXHAUSTIVO: int = 10
 
 
 # ── Utilidades matemáticas ─────────────────────────────────────────────────
@@ -194,12 +192,10 @@ def evaluar_k_particion(
 
     Toma solo los valores de los nodos de la parte Si de la distribución resultante.
 
-    Nota sobre diferencia con GeoMIP:
+    Nota sobre diferencia con métodos biparticionales:
     ──────────────────────────────────
-    GeoMIP usa bipartir(alcance=S1, mecanismo=TODOS_DIMS) para bi-partición,
-    lo que produce un corte asimétrico. KGeoMIP usa la semántica IIT estricta
-    donde cada parte ve solo su propio presente. Esto produce valores de φ
-    diferentes para k=2, pero es matemáticamente más correcto para k≥2.
+    Las biparticiones asimétricas aplican cortes sesgados; KGeoMIP usa 
+    semántica IIT estricta. Cada parte ve solo su propio presente. 
 
     Args:
         subsistema    : System ya condicionado/substradido.
@@ -285,8 +281,8 @@ class KGeoMIP(SIA):
 
     Attributes:
         k                   : Número de partes solicitado.
-        tabla_transiciones  : Tabla de costos de transición (heredada de
-                              GeometricSIA, calculada una sola vez).
+        tabla_transiciones  : Tabla de costos de transición para optimizar 
+                              el costo EMD evaluado.
         memoria_particiones : Diccionario con las pérdidas evaluadas.
     """
 
@@ -299,7 +295,7 @@ class KGeoMIP(SIA):
             f"{NET_LABEL}{len(gestor.estado_inicial)}{gestor.pagina}_k{k}"
         )
         self.logger = SafeLogger(KGEOMIP_STRATEGY_TAG)
-        # Tabla de costos de transición (se llena igual que en GeometricSIA)
+        # Tabla de costos de transición 
         self.tabla_transiciones: dict = {}
         # Registro de pérdidas por partición evaluada
         self.memoria_particiones: Dict[tuple, Tuple[float, np.ndarray]] = {}
@@ -320,7 +316,7 @@ class KGeoMIP(SIA):
 
         Pasos:
           1. Preparar el subsistema (condicionar + substraer).
-          2. Construir la tabla de costos de transiciones (idéntica a GeoMIP).
+          2. Construir la tabla de costos de transiciones.
           3. Generar candidatos de k-particiones.
           4. Evaluar cada candidato con EMD.
           5. Retornar la partición con pérdida mínima.
@@ -348,17 +344,21 @@ class KGeoMIP(SIA):
                 f"k={k_efectivo} ≥ n={n_vars}: se usa la partición atómica."
             )
             k_efectivo = n_vars
-
-        # Construir la tabla de costos (igual que GeometricSIA)
-        self._construir_tabla_costos()
-
-        # Seleccionar estrategia según tamaño del problema
-        if n_vars * k_efectivo <= UMBRAL_EXHAUSTIVO:
-            self.logger.critic("Usando búsqueda exhaustiva.")
-            particion_optima = self._busqueda_exhaustiva(k_efectivo)
+            particion_optima = tuple([i] for i in range(n_vars))
+            
+            # Construir la tabla de costos para estandarización interna
+            self._construir_tabla_costos()
         else:
-            self.logger.critic("Usando heurística greedy.")
-            particion_optima = self._heuristica_greedy(k_efectivo)
+            # Construir la tabla de costos
+            self._construir_tabla_costos()
+
+            # Seleccionar estrategia según tamaño del problema
+            if n_vars * k_efectivo <= UMBRAL_EXHAUSTIVO:
+                self.logger.critic("Usando búsqueda exhaustiva.")
+                particion_optima = self._busqueda_exhaustiva(k_efectivo)
+            else:
+                self.logger.critic("Usando heurística greedy.")
+                particion_optima = self._heuristica_greedy(k_efectivo)
 
         # Calcular la pérdida final de la partición óptima encontrada
         perdida = evaluar_k_particion(
@@ -403,13 +403,13 @@ class KGeoMIP(SIA):
             tiempo_total=time.time() - self.sia_tiempo_inicio,
         )
 
-    # ── Construcción de tabla de costos (idéntica a GeometricSIA) ─────────
+    # ── Construcción de tabla de costos ─────────
 
     def _construir_tabla_costos(self) -> None:
         """
         Construye la tabla de costos de transición entre estados del hipercubo.
 
-        Reutiliza exactamente el mismo algoritmo de GeometricSIA:
+        Algoritmo base:
           - BFS nivel por nivel desde el estado inicial al estado final.
           - Para cada par (i,j): t_X(i,j) = γ·(|X[i]-X[j]| + Σ t_X(k,j))
             con γ = 2^(-dH(i,j)).
@@ -417,7 +417,7 @@ class KGeoMIP(SIA):
         La tabla se almacena en self.tabla_transiciones para ser consultada
         durante la identificación de candidatos.
         """
-        # Datos planos de los n-cubos (igual que en GeometricSIA)
+        # Datos planos de los n-cubos
         self._flat_data = [
             ncubo.data.ravel()
             for ncubo in self.sia_subsistema.ncubos
@@ -467,7 +467,7 @@ class KGeoMIP(SIA):
         Calcula t_X(i,j) para todos los n-cubos X y lo almacena en
         self.tabla_transiciones[(tuple(i), tuple(j))].
 
-        Fórmula (del paper GeoMIP, ec. 3.1 / 4.1):
+        Fórmula:
             t_X(i,j) = γ · ( |X[i] - X[j]| + Σ_{k ∈ N(i,j)} t_X(i,k) )
         con γ = 2^(-dH(i,j)) y N(i,j) = vecinos de j en caminos óptimos hacia i.
         """
@@ -559,12 +559,12 @@ class KGeoMIP(SIA):
         Heurística greedy: aplica bipartición recursivamente.
 
         Algoritmo:
-          1. Bipartir el conjunto completo de nodos con GeoMIP → {S1, S_resto}.
-          2. Si k > 2, tomar la parte más grande de S_resto y volver al paso 1.
+          1. Bipartir recursivamente el conjunto completo de nodos.
+          2. Si k > 2, tomar la parte más grande de nodos restantes y volver al paso 1.
           3. Continuar hasta tener k partes.
 
         Nota: esta heurística no garantiza optimalidad global pero es eficiente
-        (O((k-1) · costo_GeoMIP)) y produce buenos resultados empíricos.
+        (O((k-1) · n)) y produce buenos resultados empíricos.
 
         Args:
             k: Número de partes objetivo.
@@ -587,7 +587,7 @@ class KGeoMIP(SIA):
                 )
                 break
 
-            nueva_s1, nueva_s2 = self._bipartir_subconjunto(parte_a_dividir)
+            nueva_s1, nueva_s2 = self._bipartir_subconjunto(partes_actuales, idx_mayor)
             partes_actuales.pop(idx_mayor)
             partes_actuales.append(nueva_s1)
             partes_actuales.append(nueva_s2)
@@ -599,46 +599,105 @@ class KGeoMIP(SIA):
         return tuple(partes_actuales)
 
     def _bipartir_subconjunto(
-        self, subconjunto: List[int]
+        self, partes_actuales: List[List[int]], idx_mayor: int
     ) -> Tuple[List[int], List[int]]:
         """
-        Aplica GeoMIP (bi-partición) sobre un subconjunto de los nodos.
-
-        Usa la tabla de costos ya calculada para este subsistema y evalúa
-        todas las bi-particiones del subconjunto, retornando la de menor EMD.
+        Aplica un particionamiento de dos partes sobre un subconjunto de los nodos, 
+        evaluando la k-partición resultante en el sistema completo usando una 
+        estrategia de búsqueda local Búsqueda de Escalada (Hill Climbing).
 
         Args:
-            subconjunto: Lista de índices de variables a bipartir.
+            partes_actuales: Lista de partes actuales de la k-partición.
+            idx_mayor      : Índice de la parte que se va a bipartir.
 
         Returns:
-            Dos listas de índices (S1, S2) que forman la bi-partición óptima
+            Dos listas de índices (S1, S2) que forman la bi-partición subóptima
             del subconjunto.
         """
-        if len(subconjunto) == 1:
+        import random
+        subconjunto = partes_actuales[idx_mayor]
+        n_sub = len(subconjunto)
+        if n_sub == 1:
             return [subconjunto[0]], []
 
-        mejor_s1, mejor_s2 = None, None
-        mejor_perdida = float("inf")
+        # Partes fijas que no se modifican en este paso
+        partes_fijas = [p for i, p in enumerate(partes_actuales) if i != idx_mayor]
 
-        # Evaluar todas las bi-particiones del subconjunto
-        n = len(subconjunto)
-        # Solo la mitad (2^(n-1) - 1) para evitar duplicados por complemento
-        for mascara in range(1, 1 << (n - 1)):
-            s1 = [subconjunto[i] for i in range(n) if (mascara >> i) & 1]
-            s2 = [subconjunto[i] for i in range(n) if not ((mascara >> i) & 1)]
-            if not s2:
-                continue
+        # 1. Estado inicial aleatorio (asegurarse de que ninguna parte esté vacía)
+        S1 = []
+        S2 = []
+        for x in subconjunto:
+            if random.random() < 0.5:
+                S1.append(x)
+            else:
+                S2.append(x)
+                
+        # Reparar si alguna quedó vacía
+        if not S1:
+            item = S2.pop()
+            S1.append(item)
+        elif not S2:
+            item = S1.pop()
+            S2.append(item)
 
-            particion = (s1, s2)
-            perdida = evaluar_k_particion(
+        # Función auxiliar para evaluar el estado actual
+        def evaluar_estado(s1_actual: List[int], s2_actual: List[int]) -> float:
+            particion_completa = tuple(partes_fijas + [s1_actual, s2_actual])
+            return evaluar_k_particion(
                 self.sia_subsistema,
                 self.sia_subsistema.indices_ncubos,
                 self.sia_subsistema.dims_ncubos,
-                particion,
+                particion_completa,
                 self.sia_dists_marginales,
             )
-            if perdida < mejor_perdida:
-                mejor_perdida = perdida
-                mejor_s1, mejor_s2 = s1, s2
+
+        mejor_perdida = evaluar_estado(S1, S2)
+        mejor_s1, mejor_s2 = list(S1), list(S2)
+
+        # 2. Búsqueda local (Hill Climbing) iterativa
+        mejora = True
+        while mejora:
+            mejora = False
+            vecino_encontrado_s1 = None
+            vecino_encontrado_s2 = None
+
+            # Generar y evaluar vecinos: mover un elemento de S1 a S2 o de S2 a S1
+            
+            # Vecinos moviendo de S1 a S2
+            if len(S1) > 1: # No dejar S1 vacío
+                for i, elem in enumerate(S1):
+                    nuevo_s1 = S1[:i] + S1[i+1:]
+                    nuevo_s2 = S2 + [elem]
+                    perdida_vecino = evaluar_estado(nuevo_s1, nuevo_s2)
+                    
+                    if perdida_vecino < mejor_perdida:
+                        mejor_perdida = perdida_vecino
+                        vecino_encontrado_s1 = nuevo_s1
+                        vecino_encontrado_s2 = nuevo_s2
+                        mejora = True
+                        break # First Improvement (O usar Best Improvement buscando el mínimo de todos los vecinos)
+
+            if mejora:
+                S1, S2 = vecino_encontrado_s1, vecino_encontrado_s2
+                mejor_s1, mejor_s2 = list(S1), list(S2)
+                continue # Volver a iterar el while
+
+            # Vecinos moviendo de S2 a S1
+            if len(S2) > 1: # No dejar S2 vacío
+                for i, elem in enumerate(S2):
+                    nuevo_s2 = S2[:i] + S2[i+1:]
+                    nuevo_s1 = S1 + [elem]
+                    perdida_vecino = evaluar_estado(nuevo_s1, nuevo_s2)
+                    
+                    if perdida_vecino < mejor_perdida:
+                        mejor_perdida = perdida_vecino
+                        vecino_encontrado_s1 = nuevo_s1
+                        vecino_encontrado_s2 = nuevo_s2
+                        mejora = True
+                        break
+
+            if mejora:
+                S1, S2 = vecino_encontrado_s1, vecino_encontrado_s2
+                mejor_s1, mejor_s2 = list(S1), list(S2)
 
         return mejor_s1, mejor_s2

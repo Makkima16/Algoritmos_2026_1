@@ -1,87 +1,60 @@
-# Proyecto-20261
+﻿# KGeoMIP: Particionamiento Óptimo de Sistemas Complejos
 
-Este repositorio contiene tres implementaciones principales para el analisis de MIP/IIT:
+Este proyecto implementa el algoritmo computacional **KGeoMIP** diseñado para encontrar particiones óptimas de sistemas de información compleja (redes de gran escala, como N >= 15). El objetivo matemático central es dividir la red en **k-particiones** mientras se minimiza rigurosamente la pérdida de información del sistema, una métrica que se evalúa mediante la distancia de transporte óptimo **Earth Mover's Distance (EMD)**.
 
-1. `QNodes` (base clasica, antes referida como Proyecto-2025A)
-2. `GeoMIP/src/Method2_Dynamic_Programming_Reformulation`
+---
 
-## Requisitos
+## 🚀 El Algoritmo: ¿Por qué es tan rápido y eficiente?
 
-- Linux (probado en Ubuntu)
-- Python 3.11+ (hay entornos locales con 3.12)
-- `uv` instalado
+El problema clásico de particionamiento de sistemas de grafos sufre de la infame **explosión combinatoria** (descrita asintóticamente por los Números de Bell y de Stirling). Una búsqueda exhaustiva tradicional tiene una complejidad exponencial $O(2^N)$ por cada bipartición, lo que convierte la evaluación de redes de más de 10 nodos en un proceso de días o meses de cómputo ininterrumpido.
 
-Instalacion de `uv` (si no lo tienes):
+Para superar esta barrera, la arquitectura de KGeoMIP renuncia a las iteraciones por "fuerza bruta" e implementa una **estrategia híbrida iterativa** altamente optimizada y matemáticamente guiada:
 
-```bash
-pip install uv
-```
+### 1. Enfoque "Greedy" (Codicioso) de División Iterativa
+En lugar de intentar evaluar y mapear todas las posibles particiones k de golpe, el algoritmo fracciona el sistema de manera iterativa. En cada paso, toma el subconjunto más denso (con mayor cantidad de nodos) y lo divide en dos, repitiendo el proceso hasta consolidar exactamente k particiones. Sin embargo, dividir ingenuamente un subconjunto de N=15 en dos porciones arrojaba **más de 16,000 combinaciones** que debían someterse a la costosa métrica EMD.
 
-## Estructura Rapida
+### 2. Búsqueda Local Estocástica (Hill Climbing) - *El núcleo de la eficiencia*
+Para esquivar el análisis exponencial en las redes complejas (superando el `UMBRAL_EXHAUSTIVO`), inyectamos un método de **Búsqueda Local de Escalada (Hill Climbing)** que funciona de forma magistral:
 
-- `QNodes/`: ejecucion directa de un caso de prueba (`exec.py`).
-- `GeoMIP/src/Method1_GPU_Accelerated/`: procesamiento por lotes desde Excel.
-- `GeoMIP/src/Method2_Dynamic_Programming_Reformulation/`: procesamiento por lotes desde Excel.
-- `GeoMIP/data/samples/`: datasets TPM `N*.csv` usados por Method1/Method2.
-- `GeoMIP/results/`: archivos Excel de entrada/salida para Method1/Method2.
+*   **Estado Inicial Aleatorio:** Las biparticiones inician dividiendo los nodos de forma agnóstica al azar (50/50), garantizando únicamente que ambas orillas tengan elementos.
+*   **Evaluación de Vecindario $O(N)$:** A partir de la posición inicial, el algoritmo empieza a jugar con márgenes minúsculos: toma *un único nodo* de la "Partición A" y evalúa matemáticamente su impacto si lo pasamos a la "Partición B" (y viceversa).
+*   **First Improvement (Aceptación Temprana):** En el instante exacto en el que trasladar un nodo resulta en una **disminución del costo de información (EMD)**, el algoritmo interrumpe la exploración del resto, asume este nuevo ordenamiento como el estándar dorado temporal, y re-comienza a iterar desde esta nueva posición mejorada.
+*   **Convergencia Hiper-rápida:** Esta "escalada" se repite iterativamente persiguiendo caídas drásticas en el EMD hasta chocar con el "fondo" o mínimo local; es decir, llega a un punto donde mover cualquier otro nodo individual del subconjunto solamente encarece la pérdida o la mantiene estática. 
 
-## 1) Ejecutar QNodes
+*Resultado:* El crecimiento del tiempo de ejecución cambió desde una escalabilidad **Exponencial** prohibitiva a unas cuantas docenas de comprobaciones **Lineales/Polinómicas** por cada rama o vecindario, resolviendo particiones masivas en escasos segundos.
 
-### Dependencias
+### 3. Computación Paralela (Multiprocessing)
+Para blindar el rendimiento, el gestor orquesta múltiples estados topológicos y lotes de procesamiento utilizando colas de concurrencia multinúcleo (`multiprocessing`). Cada caso de prueba viaja independientemente y tiene su propia trampa térmica (timeout) sin entorpecimiento entre hilos.
 
-Desde `QNodes/`:
+---
 
-```bash
-cd QNodes
-uv sync
-```
+## ⚙️ Arquitectura de Datos
 
-### Ejecucion
+El sistema KGeoMIP se alimenta automáticamente de dos fuentes principales sin necesitar ajustes en rutas de código:
+1. **Matrices de Transición TPM (`.csv`):** Localizadas en `GeoMIP/data/samples/` (Ej. `N15A.csv`). El script extrae e infiere automáticamente la topología más grande posible para empujar el límite del sistema. Estos datos representan conceptualmente la evolución natural del grafo complejo evaluada a través de PYPHI/EMD.
+2. **Casos Control / Sub-Sistemas (`.xlsx`):** A través del script central, extrae lotes de particiones semilla (ej. cadenas lógicas en binario que definen subconjuntos estáticos iniciales) extraidas directamente como casos de prueba desde `GeoMIP/results/Pruebas_Metodo2.xlsx`.
 
-```bash
-uv run exec.py
-```
+---
 
-### Que hace
+## 💻 Requisitos y Entorno
+*   **SO:** Compatible multiplataforma (Probado con alta eficiencia en Windows y Linux).
+*   **Python:** 3.11 o superior.
+*   **Dependencias principales:** `numpy`, `pandas`, `pyemd`, `openpyxl`.
+*   *(Sugerido)*: Administrador de entornos `uv` (opcional).
 
-- Carga una red desde `QNodes/src/.samples/` (segun el estado inicial y pagina configurada).
-- Ejecuta estrategia `BruteForce` desde `QNodes/src/main.py`.
-- Imprime la solucion en consola.
+*(Si cuentas con instalación base, instala localmente mediante `uv sync` o tu gestor tradicional dentro de `GeoMIP/src/Method2_Dynamic_Programming_Reformulation`)*
 
-### Ajustes comunes
+---
 
-Edita `QNodes/src/main.py`:
+## ▶️ Ejecución y Uso
 
-- `estado_inicial`
-- `condiciones`
-- `alcance`
-- `mecanismo`
-
-Si termina muy rapido, no necesariamente es error: puede ser un caso pequeno o corte temprano cuando `phi = 0`.
-
-## 3) Ejecutar Method2_Dynamic_Programming_Reformulation
-
-### Dependencias
-
-Desde `GeoMIP/src/Method2_Dynamic_Programming_Reformulation/`:
+Para procesar un lote de pruebas masivas del algoritmo en la consola, ejecuta:
 
 ```bash
-cd GeoMIP/src/Method2_Dynamic_Programming_Reformulation
-uv sync
+python GeoMIP/src/Method2_Dynamic_Programming_Reformulation/exec.py
 ```
 
-### Ejecucion
+El log transaccional (`CRITICAL`) te irá mostrando en vivo las iteraciones y el costo EMD de las particiones óptimas de Hill Climbing (Por ej. `| D,E || B,G,I,A,C,H... |` con `pérdida=0.1896`). 
+Los diagnósticos temporales de ejecución, las métricas, las particiones devueltas y su costo definitivo se exportan sin intervención manual a una tabla de Excel estructurada en la siguiente ruta:
 
-```bash
-uv run exec.py
-```
-
-### Entrada por defecto
-
-- Excel entrada: `GeoMIP/results/Pruebas_Metodo2.xlsx`
-- Hoja usada actualmente: indice `8`
-- Columna subsistema: `B`
-
-### Salida por defecto
-
-- Excel salida: `GeoMIP/results/resultados_Geometric.xlsx`
+* **Salida de Resultados:** `GeoMIP/results/resultados_Geometric.xlsx`

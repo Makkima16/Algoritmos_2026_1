@@ -1,11 +1,10 @@
-# from src.controllers.manager import Manager
+from src.controllers.manager import Manager
 
 # from src.controllers.strategies.force import BruteForce
 # from src.controllers.strategies.q_nodes import QNodes
-# from src.controllers.strategies.geometric import GeometricSIA
+from src.controllers.strategies.kgeomip import KGeoMIP
 
-
-# def iniciar():
+def iniciar():
 #     """Punto de entrada principal"""
 #                     # ABCD #
 #     # estado_inicial = "100"
@@ -64,8 +63,9 @@
 #         mecanismo,
 #     )
 #     print(sia_uno)
+    pass
+
 from src.controllers.manager import Manager
-from src.controllers.strategies.geometric import GeometricSIA
 from src.controllers.strategies.q_nodes import QNodes
 # Optional import: this project often runs only geometric strategy.
 try:
@@ -93,7 +93,7 @@ def convertir_a_binario(texto, n_bits=20):
 
 def ejecutar_con_tiempo(config_sistema, condiciones, alcance, mecanismo, resultado_queue, tpm):
     try:
-        analizador_fi = GeometricSIA(config_sistema)
+        analizador_fi = KGeoMIP(config_sistema)
         sia_dos = analizador_fi.aplicar_estrategia(condiciones, alcance, mecanismo, tpm)
         resultado_queue.put({
             "particion": sia_dos.particion,
