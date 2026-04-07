@@ -59,6 +59,26 @@ def emd_efecto(u: NDArray[np.float32], v: NDArray[np.float32]) -> float:
     return np.sum(np.abs(u - v))
 
 
+_HAMMING_CACHE = {}
+
+def get_hamming_matrix(n: int) -> NDArray[np.float64]:
+    """
+    Pre-calculations mechanism for the Hamming distance cost matrix.
+    Avoids calculating the distance repeatedly during Search.
+    
+    Args:
+        n (int): The dimensions of the distribution (2^n states typically, but could be number of bins).
+    """
+    if n not in _HAMMING_CACHE:
+        costs = np.empty((n, n), dtype=np.float64)
+        for i in range(n):
+            costs[i, :i] = [hamming_distance(i, j) for j in range(i)]
+            costs[:i, i] = costs[i, :i]  # Reflejo simétrico
+        np.fill_diagonal(costs, 0.0)
+        _HAMMING_CACHE[n] = costs
+    return _HAMMING_CACHE[n]
+
+
 def emd_causal(u: NDArray[np.float64], v: NDArray[np.float64]) -> float:
     """
     Calculate the Earth Mover's Distance (EMD) between two probability distributions u and v.
@@ -68,15 +88,7 @@ def emd_causal(u: NDArray[np.float64], v: NDArray[np.float64]) -> float:
         raise TypeError("u and v must be numpy arrays.")
 
     n: int = u.size
-    costs: NDArray[np.float64] = np.empty((n, n))
-
-    for i in range(n):
-        # Utiliza comprensión de listas para calcular los costos
-        costs[i, :i] = [hamming_distance(i, j) for j in range(i)]
-        costs[:i, i] = costs[i, :i]  # Reflejar los valores
-    np.fill_diagonal(costs, INT_ZERO)
-
-    cost_mat: NDArray[np.float64] = np.array(costs, dtype=np.float64)
+    cost_mat = get_hamming_matrix(n)
     return emd(u, v, cost_mat)
 
 

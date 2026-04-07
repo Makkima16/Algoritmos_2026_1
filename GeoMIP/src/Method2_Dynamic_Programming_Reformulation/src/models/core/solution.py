@@ -41,9 +41,10 @@ class Solution:
             Contiene las probabilidades de cada estado en el espacio de la partición
             que minimiza la información integrada.
 
-        particion (str):
-            Representación en formato string de la mejor partición encontrada.
-            Utiliza notación matemática para mostrar la estructura de la partición.
+        particion (str | list):
+            Representación de la mejor partición encontrada. Puede ser el string
+            formateado o una estructura de k grupos para mantener la integridad de
+            los datos.
 
         hablar (bool, opcional):
             Si es True, anuncia la solución encontrada usando síntesis de voz.
@@ -64,8 +65,8 @@ class Solution:
         distribucion_particion (np.ndarray):
             La distribución de probabilidad de la partición.
 
-        particion (str):
-            La representación de la mejor partición.
+        particion (str | list):
+            La representación o estructura de $k$ grupos de la mejor partición.
 
         id_voz (Optional[str]):
             El identificador de la voz seleccionada para la síntesis.
@@ -99,7 +100,7 @@ class Solution:
         perdida: float,
         distribucion_subsistema: np.ndarray,
         distribucion_particion: np.ndarray,
-        particion: str,
+        particion,
         tiempo_total: float = FLOAT_ZERO,
         hablar: bool = True,
         voz: Optional[str] = None,
@@ -254,6 +255,9 @@ class Solution:
             f"{self.tiempo_ejecucion/60:.1f}",
             f"{self.tiempo_ejecucion:.4f}",
         )
+        
+        particion_str = self.particion if isinstance(self.particion, str) else str(self.particion)
+        
         return f"""{Fore.CYAN}{bilinea}
 
 {Fore.RED}{self.estrategia} fue la estrategia de solucion.
@@ -269,7 +273,7 @@ class Solution:
 {Style.RESET_ALL}{formatear_distribucion(self.distribucion_particion)}
 
 {Fore.YELLOW}Mejor Partición:
-{Fore.MAGENTA}{self.particion}
+{Fore.MAGENTA}{particion_str}
 {Fore.GREEN}Perdida mínima ( φ ) = {self.perdida:.4f}
 
 {Fore.BLUE}Tiempos de ejecución:

@@ -3,6 +3,8 @@ from numpy.typing import NDArray
 import numpy as np
 
 
+# frozen=True means we cannot easily mutate `self._marginal_cache`. We'll need `object.__setattr__` or we avoid dataclass strictness for the cache.
+# To keep strictly frozen but support DP memoization, we'll implement caching inside a wrapper or use the `__dict__`.
 @dataclass(frozen=True)
 class NCube:
     """
@@ -90,49 +92,22 @@ class NCube:
 
     def marginalizar(self, ejes: NDArray[np.int8]) -> "NCube":
         """
-        Marginalizar a nivel del n-cubo permite acoplar o colapsar una o más dimensiones manteniendo la probabilidad condicional.
-        El n-cubo puede esquematizarse de forma tal que se aprecie el solapamiento y promedio ente caras, donde la dimensión más baja es el primer desplazamiento dimensional sobre el arreglo.
-        Es importante validar la intersección de ejes puesto es una rutina llamada en sistema desde marginalizar como particionar.
-
-        Args:
-        ----
-            ejes (NDArray[np.int8]): Arreglo con las dimensiones a marginalizar o eliminar. Se valida que los ejes o dimensiones dadas estén y finalmente alineamos nuevamente con las dimensiones locales, donde con numpy debemos hacer uso de la dimensión complementaria para alinear la dimensión externa a la más interna.
-
-        Returns:
-        -------
-            NCube: El n-cubo marginalizado en las dimensiones dadas. Donde es equivalente el marginalizar sobre (a, b,) que primero en (a,) y luego en (b,) o viceversa.
-
-        Example:
-        -------
-            >>> dimensiones = np.array([2, 3])
-            >>> mi_ncubo
-            NCube(index=0):
-            dims=[0 1 2]
-            shape=(2, 2, 2)
-            data=
-                [[[0. 0.]
-                [1. 1.]],
-                [[1. 1.]
-                [1. 1.]]]
-                
-                [[0.5 0.5]
-                [1. 1.]]
-
-                [0.75 0.75]
-
-            >>> mi_ncubo.marginalizar(dimensiones)
-            NCube(index=0):
-                dims=[0]
-                shape=(2,)
-                data=
-                    [0.75 0.75]
-
-            Se han agrupado los valores del n-cubo por promedio, dejando los remanentes en la dimension 0.
+        Reduce la dimensionalidad del N-Cubo mediante marginalización.
+        Incluye memoización (Caché de Marginales) para acelerar búsquedas
+        repetitivas en el agrupamiento jerárquico de k-particiones.
         """
-
         marginable_axis = np.intersect1d(ejes, self.dims)
         if not marginable_axis.size:
             return self
+
+        # Caché para programación dinámica (Memoization)
+        # Usamos frozenset sobre los ejes marginables como clave de caché
+        cache_key = frozenset(marginable_axis.tolist())
+        if not hasattr(self, '_marginal_cache'):
+            object.__setattr__(self, '_marginal_cache', {})
+        if cache_key in self._marginal_cache:
+            return self._marginal_cache[cache_key]
+
         numero_dims = self.dims.size - 1
         ejes_locales = tuple(
             numero_dims - dim_idx
@@ -143,11 +118,15 @@ class NCube:
             [d for d in self.dims if d not in marginable_axis],
             dtype=np.int8,
         )
-        return NCube(
-            data=np.mean(self.data, axis=ejes_locales, keepdims=False),
-            dims=new_dims,
+        
+        nuevo_ncube = NCube(
             indice=self.indice,
+            dims=new_dims,
+            data=np.mean(self.data, axis=ejes_locales, keepdims=False)
         )
+        
+        self._marginal_cache[cache_key] = nuevo_ncube
+        return nuevo_ncube
 
     def __str__(self) -> str:
         dims_str = f"dims={self.dims}"

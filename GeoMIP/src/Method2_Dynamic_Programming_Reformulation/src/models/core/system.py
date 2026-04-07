@@ -219,6 +219,47 @@ class System:
         )
         return new_sys
 
+    def particionar(
+        self,
+        particiones: list[tuple[NDArray[np.int8], NDArray[np.int8]]]
+    ) -> "System":
+        """
+        Es en este método donde generamos a partir de un subsistema, una partición en k grupos.
+        Generaliza el bipartir original para soportar k subconjuntos.
+
+        Args:
+            particiones (list[tuple[NDArray[np.int8], NDArray[np.int8]]]): 
+                Una lista de tuplas donde cada tupla representa un subconjunto (Si) de la partición.
+                Cada tupla contiene (alcance_i, mecanismo_i).
+                Donde alcance_i son los nodos de ese subconjunto en el futuro,
+                y mecanismo_i son los nodos de ese subconjunto en el presente.
+
+        Returns:
+            System: Se retorna un sistema que representa el producto tensorial de los subsistemas particionados.
+                    Para cada cubo en un grupo Si, se marginalizan los elementos que NO están en su
+                    respectivo mecanismo_i.
+        """
+        
+        ncubos_procesados = []
+        for cube in self.ncubos:
+            procesado = False
+            for alcance_i, mecanismo_i in particiones:
+                if cube.indice in alcance_i:
+                    ncubos_procesados.append(cube.marginalizar(np.setdiff1d(cube.dims, mecanismo_i)))
+                    procesado = True
+                    break
+            if not procesado:
+                # Si un cubo no está en ningún alcance (en teoría todos deberían estar),
+                # por defecto marginalizamos todo (lo que daría una escalar si todo falla) o nada.
+                # Como comportamiento fallback compatible a "bipartir" si el cubo estaba "fuera":
+                # Aunque en una k-particion completa, todo cubo debe pertenecer a un Si.
+                ncubos_procesados.append(cube)
+
+        new_sys = System.__new__(System)
+        new_sys.estado_inicial = self.estado_inicial
+        new_sys.ncubos = tuple(ncubos_procesados)
+        return new_sys
+
     def bipartir(
         self,
         alcance: NDArray[np.int8],
@@ -262,6 +303,25 @@ class System:
                 probabilidad = ncubo.data[seleccionar_subestado(sub_estado_inicial)]
             distribuciones[i] = 1 - probabilidad
         return distribuciones
+
+    def producto_tensorial(self, distribuciones_marginales: list[NDArray[np.float32]]) -> NDArray[np.float32]:
+        """
+        Calcula el producto tensorial recursivo/iterativo (Kron) para un conjunto de distribuciones
+        marginales, en aras de reconstruir el sistema Q completo a probar contra el original.
+
+        Args:
+            distribuciones_marginales: Lista de Arrays 1D correspondiendo a la marginal de cada subsistema {S1, ..., Sk}.
+
+        Returns:
+            La distribución conjunta reconstruida a partir del producto de las k marginales.
+        """
+        if not distribuciones_marginales:
+            return np.array([1.0], dtype=np.float32)
+        
+        Q = distribuciones_marginales[0]
+        for dist in distribuciones_marginales[1:]:
+            Q = np.kron(Q, dist)
+        return Q
 
     def __str__(self) -> str:
         sub_dims = self.dims_ncubos
