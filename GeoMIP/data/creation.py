@@ -19,9 +19,29 @@ class SystemCreator:
         estimated_time = total_size_gb * 2
         print(f'Tiempo estimado: {estimated_time:.1f} segundos ({estimated_time/60:.1f} minutos)')
 
-        print('Generando estados...')
+        print('Generando estados (probabilidades correlacionadas)...')
         start_time = time.time()
-        self.states = np.random.randint(2, size=(self.num_states, N), dtype=np.int8)
+        
+        # 1. Generar matriz de probabilidades base evitando el ruido blanco puro (0.5 puro)
+        self.states = np.random.uniform(0.2, 0.8, size=(self.num_states, N))
+        
+        # 2. Introducir Correlación: Dependencia del valor j respecto a los bits del estado actual
+        # Obtenemos la representación binaria de cada fila (estado)
+        state_indices = np.arange(self.num_states)[:, np.newaxis]
+        shifts = np.arange(N - 1, -1, -1)
+        binary_states = (state_indices >> shifts) & 1
+        
+        # Hacemos que cada nodo dependa de sus vecinos en la cadena de bits para crear una alta integración
+        left_neighbors = np.roll(binary_states, shift=1, axis=1)
+        right_neighbors = np.roll(binary_states, shift=-1, axis=1)
+        
+        # Ajustamos las probabilidades base según la activación de los nodos circundantes
+        self.states += 0.15 * left_neighbors
+        self.states -= 0.10 * right_neighbors
+        
+        # Garantizamos que las probabilidades se mantengan en el rango (0, 1) excluyente para emd
+        self.states = np.clip(self.states, 0.000001, 0.999999)
+        
         elapsed = time.time() - start_time
         print(f'Generación completada en {elapsed:.2f} segundos')
 
@@ -33,14 +53,14 @@ class SystemCreator:
     def save_to_csv(self, filename: str = None):
         filename = f'Sys{self.N}.csv' if filename is None else filename
 
-        os.makedirs('.assets', exist_ok=True)
-        filepath = os.path.join('.assets', filename)
+        os.makedirs('GeoMIP\.assets', exist_ok=True)
+        filepath = os.path.join('GeoMIP\.assets', filename)
         print(f'\nGuardando estados en {filepath}...')
 
         start_time = time.time()
 
-        # Guardar solo la data, sin header
-        np.savetxt(filepath, self.states, delimiter=',', fmt='%d')
+        # Guardar solo la data, sin header, y con precisión flotante (Probabilidades)
+        np.savetxt(filepath, self.states, delimiter=',', fmt='%.6f')
 
         elapsed = time.time() - start_time
         file_size_gb = os.path.getsize(filepath) / (1024**3)
@@ -62,7 +82,8 @@ def generate_and_save(N: int):
 
 if __name__ == '__main__':
     try:
-        system = generate_and_save(8)
+        # Generar un sistema que sea un reto real computacional sin saturar el cálculo de EMD.
+        system = generate_and_save(10)
     except KeyboardInterrupt:
         print('\nOperación cancelada por el usuario')
     except Exception as e:
