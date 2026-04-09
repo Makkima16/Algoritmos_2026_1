@@ -82,8 +82,12 @@ def generate_and_save(N: int):
 
 if __name__ == '__main__':
     try:
+        n_str = input('\nIngrese el número de variables (N) para el sistema: ').strip()
+        n_val = int(n_str)
         # Generar un sistema que sea un reto real computacional sin saturar el cálculo de EMD.
-        system = generate_and_save(10)
+        system = generate_and_save(n_val)
+    except ValueError:
+        print('\nError: Por favor ingrese un número entero válido.')
     except KeyboardInterrupt:
         print('\nOperación cancelada por el usuario')
     except Exception as e:
