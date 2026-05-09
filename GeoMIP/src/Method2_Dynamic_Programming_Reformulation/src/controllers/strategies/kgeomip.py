@@ -53,7 +53,7 @@ from typing import List, Tuple, Dict, Optional
 import numpy as np
 
 from src.controllers.manager import Manager
-from src.funcs.base import emd_efecto, ABECEDARY, LOWER_ABECEDARY
+from src.funcs.base import emd_causal, ABECEDARY, LOWER_ABECEDARY
 from src.funcs.format import fmt_biparte_q
 from src.middlewares.slogger import SafeLogger
 from src.middlewares.profile import profiler_manager, profile
@@ -163,6 +163,25 @@ def generar_k_particiones(elementos: List[int], k: int):
     yield from _distribuir(1, partes_vacias, 0)
 
 
+def distribucion_conjunta_vectorizada(probabilidades: np.ndarray) -> np.ndarray:
+    """
+    Construye la distribución conjunta P de tamaño 2^N a partir de N probabilidades marginales p_i.
+    Vectorizado y sin bucles for explícitos utilizando meshgrid y prod.
+    """
+    if len(probabilidades) == 0:
+        return np.array([1.0], dtype=np.float64)
+    # Formar factores [1-p, p] para cada probabilidad
+    p_1 = np.asarray(probabilidades, dtype=np.float64)
+    p_0 = 1.0 - p_1
+    factors = np.stack([p_0, p_1], axis=1)
+    
+    # Generar la grilla de productos de Kronecker equivalentes para variables independientes
+    grid = np.meshgrid(*factors, indexing='ij')
+    # Multiplicar en todos los ejes para formar el tensor de estado conjunto
+    dist = np.prod(grid, axis=0).flatten()
+    return dist
+
+
 def evaluar_k_particion(
     subsistema,
     indices_ncubos: np.ndarray,
@@ -171,7 +190,8 @@ def evaluar_k_particion(
     dist_original: np.ndarray,
 ) -> float:
     """
-    Calcula la pérdida EMD de una k-partición usando semántica IIT estricta.
+    Calcula la pérdida EMD de una k-partición usando semántica IIT estricta y 
+    las distribuciones conjuntas totales (de tamaño 2^N).
 
     Definición matemática:
     ──────────────────────
@@ -182,20 +202,9 @@ def evaluar_k_particion(
 
     donde P(Xj=1 | estado_Si,t) se obtiene marginalizando el ncubo_j sobre todos
     los dims que NO pertenecen a Si, y evaluando en estado_inicial[Si].
-
-    Implementación:
-    ───────────────
-    Usa System.bipartir(futuros=Si, mecanismo=Si_dims) que:
-    - Para j ∈ Si (en alcance):   ncubo_j marginaliza dims excluidos de mecanismo
-                                   = marginaliza dims ∉ Si
-    - Para j ∉ Si (fuera):         ncubo_j marginaliza mecanismo completo (Si_dims)
-
-    Toma solo los valores de los nodos de la parte Si de la distribución resultante.
-
-    Nota sobre diferencia con métodos biparticionales:
-    ──────────────────────────────────
-    Las biparticiones asimétricas aplican cortes sesgados; KGeoMIP usa 
-    semántica IIT estricta. Cada parte ve solo su propio presente. 
+    
+    Luego, P = ⊗_i P(nodo i en sistema total) de tamaño 2^N
+    Y se construye Q = ⊗_i P(nodo i en sistema particionado) de tamaño 2^N
 
     Args:
         subsistema    : System ya condicionado/substradido.
@@ -208,7 +217,7 @@ def evaluar_k_particion(
         Valor EMD (float, ≥ 0).
     """
     n = len(dist_original)
-    dist_reconstruida = np.empty(n, dtype=np.float32)
+    dist_reconstruida = np.empty(n, dtype=np.float64)
 
     for parte in particion:
         if not parte:
@@ -222,8 +231,6 @@ def evaluar_k_particion(
         presentes_parte = dims_ncubos[parte_arr]
 
         # bipartir(futuros=Si, mecanismo=Si_dims):
-        #   j ∈ Si: marginaliza dims ∉ Si → ncubo reducido a dims Si
-        #   j ∉ Si: marginaliza Si_dims → escalar
         sistema_parte = subsistema.bipartir(futuros_parte, presentes_parte)
         dist_parte    = sistema_parte.distribucion_marginal()  # shape (n,)
 
@@ -231,11 +238,16 @@ def evaluar_k_particion(
         for idx_pos in parte:
             dist_reconstruida[idx_pos] = dist_parte[idx_pos]
 
-    return float(emd_efecto(dist_original, dist_reconstruida))
+    # Requisitos: Generar distribuciones conjuntas P y Q de tamaño 2^N para el cálculo de EMD empírico
+    dist_P_conjunta = distribucion_conjunta_vectorizada(dist_original)
+    dist_Q_conjunta = distribucion_conjunta_vectorizada(dist_reconstruida)
+
+    # Calculamos EMD usando la función base (con precalculo de penalidad de Hamming)
+    return float(emd_causal(dist_P_conjunta, dist_Q_conjunta))
 
 
 
-def fmt_k_particion(particion: Tuple[List[int], ...], vertices: set) -> str:
+def fmt_k_particion(particion: Tuple[List[int], ...], indices_reales: np.ndarray) -> str:
     """
     Formatea una k-partición para mostrarla en consola.
 
@@ -243,16 +255,17 @@ def fmt_k_particion(particion: Tuple[List[int], ...], vertices: set) -> str:
     y presentes (minúscula), separadas por "|".
 
     Args:
-        particion: Tupla de k listas de índices.
-        vertices : Conjunto de vértices del subsistema (pares (tiempo, idx)).
+        particion: Tupla de k listas de índices relativos al subsistema.
+        indices_reales: El mapeo a los índices originales de la red completa.
 
     Returns:
         String con la representación de la k-partición.
     """
     partes_fmt = []
     for parte in particion:
-        futuros = [ABECEDARY[i] for i in parte]
-        presentes = [LOWER_ABECEDARY[i] for i in parte]
+        # mapear índice interno al índice original
+        futuros = [ABECEDARY[indices_reales[i]] for i in parte]
+        presentes = [LOWER_ABECEDARY[indices_reales[i]] for i in parte]
         str_fut = ",".join(futuros) if futuros else VOID_STR
         str_pres = ",".join(presentes) if presentes else VOID_STR
         ancho = max(len(str_fut), len(str_pres)) + 2
@@ -384,10 +397,7 @@ class KGeoMIP(SIA):
 
         fmt = fmt_k_particion(
             particion_optima,
-            set(
-                [(EFECTO, i) for i in self.sia_subsistema.indices_ncubos]
-                + [(ACTUAL, i) for i in self.sia_subsistema.dims_ncubos]
-            ),
+            self.sia_subsistema.indices_ncubos
         )
 
         self.logger.critic(

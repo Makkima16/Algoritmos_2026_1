@@ -51,10 +51,20 @@ class SystemCreator:
         return self.states[:, dimension]
 
     def save_to_csv(self, filename: str = None):
-        filename = f'Sys{self.N}.csv' if filename is None else filename
+        target_dir = os.path.join('GeoMIP', 'data', 'samples')
+        os.makedirs(target_dir, exist_ok=True)
 
-        os.makedirs('GeoMIP\.assets', exist_ok=True)
-        filepath = os.path.join('GeoMIP\.assets', filename)
+        if filename is None:
+            # Buscar la siguiente letra disponible A, B, C...
+            for i in range(26):
+                letter = chr(65 + i)
+                filename = f'N{self.N}{letter}.csv'
+                filepath = os.path.join(target_dir, filename)
+                if not os.path.exists(filepath):
+                    break
+        else:
+            filepath = os.path.join(target_dir, filename)
+
         print(f'\nGuardando estados en {filepath}...')
 
         start_time = time.time()

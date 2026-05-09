@@ -1,0 +1,17 @@
+{
+    "dataset": "N16A.csv",
+    "estado_inicial": "1000000000000000",
+    "k_particiones": 2,
+    "estrategia": "KGeoMIP(k=2)",
+    "perdida_phi": 0.2509570047259331,
+    "distribucion_subsistema": [
+        0.054586999118328094,
+        0.25922301411628723
+    ],
+    "distribucion_particion": [
+        0.21466700732707977,
+        0.35010001063346863
+    ],
+    "particion": "| A || B |\n| a || b |",
+    "tiempo_total": 0.0
+}
