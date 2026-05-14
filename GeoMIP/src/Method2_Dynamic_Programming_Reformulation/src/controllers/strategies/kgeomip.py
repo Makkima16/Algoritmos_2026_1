@@ -51,6 +51,7 @@ from math import comb
 from typing import List, Tuple, Dict, Optional
 
 import numpy as np
+from joblib import Parallel, delayed
 
 from src.controllers.manager import Manager
 from src.funcs.base import emd_causal, ABECEDARY, LOWER_ABECEDARY
@@ -238,7 +239,10 @@ def evaluar_k_particion(
         for idx_pos in parte:
             dist_reconstruida[idx_pos] = dist_parte[idx_pos]
 
-    # Requisitos: Generar distribuciones conjuntas P y Q de tamaño 2^N para el cálculo de EMD empírico
+    # Ambos tensores se forman asumiendo independencia entre marginales (tensor product).
+    # Matemáticamente es indispensable generar el tensor de tamaño 2^N para conservar la causalidad 
+    # estructural requerida por la métrica EMD de la Teoría de la Información Integrada originada en PyPhi.
+    # Evitamos construir meshgrids línea por línea e invocamos la función de utilería matemática.
     dist_P_conjunta = distribucion_conjunta_vectorizada(dist_original)
     dist_Q_conjunta = distribucion_conjunta_vectorizada(dist_reconstruida)
 
@@ -322,78 +326,76 @@ class KGeoMIP(SIA):
         alcance: str,
         mecanismo: str,
         tpm: np.ndarray,
-        k: Optional[int] = None,
+        k: Optional[int] = None, # k is deprecated since we search ALL, kept for signature
     ) -> Solution:
         """
-        Encuentra la k-Partición de Mínima Información (k-MIP) del subsistema.
-
-        Pasos:
-          1. Preparar el subsistema (condicionar + substraer).
-          2. Construir la tabla de costos de transiciones.
-          3. Generar candidatos de k-particiones.
-          4. Evaluar cada candidato con EMD.
-          5. Retornar la partición con pérdida mínima.
-
-        Args:
-            condicion : Bits que indican qué variables condicionar (0=condicionar).
-            alcance   : Bits que indican qué variables incluir en el alcance.
-            mecanismo : Bits que indican qué variables incluir en el mecanismo.
-            tpm       : Matriz de probabilidad de transición (np.ndarray).
-            k         : Número de partes (sobreescribe el k del constructor si se da).
-
-        Returns:
-            Solution con la k-MIP encontrada.
+        Encuentra la Participación de Mínima Información ÓPTIMA GLOBAL (Optimal K-MIP).
+        Itera sobre todos los k (desde 2 hasta N) y elige la partición
+        con la mínima pérdida EMD para cumplir con el requisito formal del proyecto.
         """
-        k_efectivo = k if k is not None else self.k
 
-        self.logger.critic(f"Iniciando KGeoMIP con k={k_efectivo}.")
+        self.logger.critic(f"Iniciando KGeoMIP para búsqueda de k global óptimo.")
         self.sia_preparar_subsistema(condicion, alcance, mecanismo, tpm)
 
         n_vars = len(self.sia_subsistema.indices_ncubos)
 
-        # Caso trivial: si k ≥ n, la única partición válida es cada variable sola
-        if k_efectivo >= n_vars:
-            self.logger.critic(
-                f"k={k_efectivo} ≥ n={n_vars}: se usa la partición atómica."
-            )
-            k_efectivo = n_vars
+        # Caso trivial: si n <= 1
+        if n_vars <= 1:
             particion_optima = tuple([i] for i in range(n_vars))
+            k_optimo = n_vars
+            mejor_perdida = 0.0
             
-            # Construir la tabla de costos para estandarización interna
-            self._construir_tabla_costos()
+            # Distribución reconstruida
+            dist_reconstruida = self.sia_dists_marginales.copy()
         else:
-            # Construir la tabla de costos
             self._construir_tabla_costos()
+            
+            mejor_perdida = float('inf')
+            particion_optima = None
+            k_optimo = 2
+            self.historico_particiones = []
+            
+            # Evaluar todas las K posibles desde 2 hasta n_vars
+            for test_k in range(2, n_vars + 1):
+                if n_vars * test_k <= UMBRAL_EXHAUSTIVO:
+                    part_k = self._busqueda_exhaustiva(test_k)
+                else:
+                    part_k = self._agrupamiento_jerarquico(test_k)
+                
+                perdida_k = evaluar_k_particion(
+                    self.sia_subsistema,
+                    self.sia_subsistema.indices_ncubos,
+                    self.sia_subsistema.dims_ncubos,
+                    part_k,
+                    self.sia_dists_marginales,
+                )
 
-            # Seleccionar estrategia según tamaño del problema
-            if n_vars * k_efectivo <= UMBRAL_EXHAUSTIVO:
-                self.logger.critic("Usando búsqueda exhaustiva.")
-                particion_optima = self._busqueda_exhaustiva(k_efectivo)
-            else:
-                self.logger.critic("Usando agrupamiento jerárquico bottom-up.")
-                particion_optima = self._agrupamiento_jerarquico(k_efectivo)
+                fmt_pk = fmt_k_particion(part_k, self.sia_subsistema.indices_ncubos)
+                self.historico_particiones.append({
+                    "k": test_k,
+                    "perdida": float(perdida_k),
+                    "particion_grafica": fmt_pk
+                })
+                
+                if perdida_k < mejor_perdida:
+                    mejor_perdida = perdida_k
+                    particion_optima = part_k
+                    k_optimo = test_k
+                    
+                    if mejor_perdida == 0.0:  # Optimización, no se puede mejorar 0.0
+                        break
 
-        # Calcular la pérdida final de la partición óptima encontrada
-        perdida = evaluar_k_particion(
-            self.sia_subsistema,
-            self.sia_subsistema.indices_ncubos,
-            self.sia_subsistema.dims_ncubos,
-            particion_optima,
-            self.sia_dists_marginales,
-        )
-
-        # Distribución reconstruida para el Solution (misma lógica que evaluar_k_particion)
-        n = len(self.sia_dists_marginales)
-        dist_reconstruida = np.empty(n, dtype=np.float32)
-        for parte in particion_optima:
-            if not parte:
-                continue
-            parte_arr = np.array(parte, dtype=np.int8)
-            futuros   = self.sia_subsistema.indices_ncubos[parte_arr]
-            presentes = self.sia_subsistema.dims_ncubos[parte_arr]
-            dist_parte = self.sia_subsistema.bipartir(futuros, presentes).distribucion_marginal()
-            for idx_pos in parte:
-                dist_reconstruida[idx_pos] = dist_parte[idx_pos]
+            # Distribución reconstruida para el Solution con la partición óptima
+            dist_reconstruida = np.empty(len(self.sia_dists_marginales), dtype=np.float32)
+            for parte in particion_optima:
+                if not parte:
+                    continue
+                parte_arr = np.array(parte, dtype=np.int8)
+                futuros   = self.sia_subsistema.indices_ncubos[parte_arr]
+                presentes = self.sia_subsistema.dims_ncubos[parte_arr]
+                dist_parte = self.sia_subsistema.bipartir(futuros, presentes).distribucion_marginal()
+                for idx_pos in parte:
+                    dist_reconstruida[idx_pos] = dist_parte[idx_pos]
 
         fmt = fmt_k_particion(
             particion_optima,
@@ -401,12 +403,12 @@ class KGeoMIP(SIA):
         )
 
         self.logger.critic(
-            f"k-MIP encontrada con pérdida={perdida:.6f}:\n{fmt}"
+            f"ÓPTIMA k-MIP encontrada (k={k_optimo}) con pérdida={mejor_perdida:.6f}:\n{fmt}"
         )
 
         return Solution(
-            estrategia=f"{KGEOMIP_LABEL}(k={k_efectivo})",
-            perdida=perdida,
+            estrategia=f"{KGEOMIP_LABEL}(Global Optimal K={k_optimo})",
+            perdida=mejor_perdida,
             distribucion_subsistema=self.sia_dists_marginales,
             distribucion_particion=dist_reconstruida,
             particion=fmt,
@@ -533,15 +535,12 @@ class KGeoMIP(SIA):
         n_vars = len(self.sia_subsistema.indices_ncubos)
         elementos = list(range(n_vars))
 
-        mejor_particion = None
-        mejor_perdida = float("inf")
-
         total_stirling = stirling2(n_vars, k)
         self.logger.critic(
-            f"Exhaustiva: S({n_vars},{k}) = {total_stirling} particiones."
+            f"Exhaustiva: S({n_vars},{k}) = {total_stirling} particiones. Resolviendo en paralelo..."
         )
 
-        for particion in generar_k_particiones(elementos, k):
+        def evaluar_en_proceso(particion):
             perdida = evaluar_k_particion(
                 self.sia_subsistema,
                 self.sia_subsistema.indices_ncubos,
@@ -549,9 +548,21 @@ class KGeoMIP(SIA):
                 particion,
                 self.sia_dists_marginales,
             )
+            return (perdida, particion)
+
+        # Evaluar en paralelo
+        iterador_particiones = generar_k_particiones(elementos, k)
+        resultados = Parallel(n_jobs=-1)(
+            delayed(evaluar_en_proceso)(p) for p in iterador_particiones
+        )
+
+        mejor_perdida = float("inf")
+        mejor_particion = None
+
+        for perdida, particion in resultados:
             self.memoria_particiones[tuple(tuple(p) for p in particion)] = (
                 perdida,
-                None,  # distribución: se calcula al final solo para la óptima
+                None,
             )
             if perdida < mejor_perdida:
                 mejor_perdida = perdida
@@ -584,44 +595,41 @@ class KGeoMIP(SIA):
         # Empieza con n particiones independientes
         particiones: List[List[int]] = [[i] for i in range(n_vars)]
 
+        def evaluar_fusion(i, j, particiones_actuales):
+            nueva_parte = particiones_actuales[i] + particiones_actuales[j]
+            particion_prueba = tuple(
+                [particiones_actuales[p] for p in range(len(particiones_actuales)) if p != i and p != j] 
+                + [nueva_parte]
+            )
+            perdida = evaluar_k_particion(
+                self.sia_subsistema,
+                self.sia_subsistema.indices_ncubos,
+                self.sia_subsistema.dims_ncubos,
+                particion_prueba,
+                self.sia_dists_marginales,
+            )
+            return (perdida, i, j, nueva_parte)
+
         while len(particiones) > k:
-            mejor_perdida = float("inf")
-            mejor_union = None
-            indices_a_fusionar = (-1, -1)
-
             n_partes = len(particiones)
-            for i in range(n_partes):
-                for j in range(i + 1, n_partes):
-                    nueva_parte = particiones[i] + particiones[j]
+            pares_a_evaluar = [(i, j) for i in range(n_partes) for j in range(i + 1, n_partes)]
 
-                    particion_prueba = tuple(
-                        [particiones[p] for p in range(n_partes) if p != i and p != j] + [nueva_parte]
-                    )
+            resultados = Parallel(n_jobs=-1)(
+                delayed(evaluar_fusion)(i, j, particiones) for i, j in pares_a_evaluar
+            )
 
-                    perdida = evaluar_k_particion(
-                        self.sia_subsistema,
-                        self.sia_subsistema.indices_ncubos,
-                        self.sia_subsistema.dims_ncubos,
-                        particion_prueba,
-                        self.sia_dists_marginales,
-                    )
+            # Extraemos el que tenga la mejor (menor) pérdida
+            mejor_perdida, i_idx, j_idx, mejor_union = min(resultados, key=lambda x: x[0])
 
-                    if perdida < mejor_perdida:
-                        mejor_perdida = perdida
-                        mejor_union = nueva_parte
-                        indices_a_fusionar = (i, j)
-
-            i_idx, j_idx = indices_a_fusionar
             nueva_lista_particiones = [
                 particiones[p] for p in range(n_partes) if p != i_idx and p != j_idx
             ]
-            if mejor_union is not None:
-                nueva_lista_particiones.append(mejor_union)
+            nueva_lista_particiones.append(mejor_union)
             
             particiones = nueva_lista_particiones
 
             self.logger.critic(
-                f"Jerárquico (Bottom-Up): Fusionadas partes {indices_a_fusionar} -> {mejor_union}. "
+                f"Jerárquico (Bottom-Up): Fusionadas partes {(i_idx, j_idx)} -> {mejor_union}. "
                 f"Particiones restantes: {len(particiones)}, Pérdida: {mejor_perdida:.6f}"
             )
 

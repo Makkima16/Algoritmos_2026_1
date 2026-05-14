@@ -71,8 +71,13 @@ class Manager:
 
     @property
     def output_dir(self) -> Path:
+        estado_str = self.estado_inicial
+        if len(estado_str) > 32:
+            import hashlib
+            h = hashlib.sha256(estado_str.encode("utf-8")).hexdigest()[:16]
+            estado_str = f"{estado_str[:8]}...{estado_str[-8:]}_{h}"
         return Path(
-            f"{RESOLVER_PATH}/N{len(self.estado_inicial)}{self.pagina}/{self.estado_inicial}"
+            f"{RESOLVER_PATH}/N{len(self.estado_inicial)}{self.pagina}/{estado_str}"
         )
 
     def generar_red(self, dimensiones: int, datos_discretos: bool = True) -> str:

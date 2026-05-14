@@ -69,6 +69,11 @@ def get_hamming_matrix(n: int) -> NDArray[np.float64]:
     Args:
         n (int): The dimensions of the distribution (2^n states typically, but could be number of bins).
     """
+    # Liberar caché si excede cierto límite para evitar OOM Crash (e.g. n > 32768, que es 15 dims)
+    if n > 32768:
+        # No crear matriz densa si es masivo
+        raise MemoryError(f"No se puede evaluar EMD clásica con tamaño {n}x{n} por memoria.")
+        
     if n not in _HAMMING_CACHE:
         costs = np.empty((n, n), dtype=np.float64)
         for i in range(n):

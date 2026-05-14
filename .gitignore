@@ -58,3 +58,6 @@ build/
 /review
 .logs
 .assets
+/data
+/results
+/.samples
