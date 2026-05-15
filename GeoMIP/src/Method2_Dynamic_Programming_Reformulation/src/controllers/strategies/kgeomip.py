@@ -56,6 +56,7 @@ from joblib import Parallel, delayed
 from src.controllers.manager import Manager
 from src.funcs.base import emd_causal, ABECEDARY, LOWER_ABECEDARY
 from src.funcs.format import fmt_biparte_q
+from src.funcs.emd_optimized import emd_causal_fast_partition
 from src.middlewares.slogger import SafeLogger
 from src.middlewares.profile import profiler_manager, profile
 from src.models.base.sia import SIA
@@ -76,7 +77,8 @@ KGEOMIP_ANALYSIS_TAG: str = f"{KGEOMIP_LABEL}_analysis"
 
 # Si n * k supera este umbral se usa la heurística greedy en lugar de fuerza
 # bruta sobre k-particiones. Se ajustó a 10 para evitar la explosión combinatoria.
-UMBRAL_EXHAUSTIVO: int = 10
+# NOTA: Para N ≤ 12, aumentamos a 15 para permitir búsqueda exhaustiva (más rápida).
+UMBRAL_EXHAUSTIVO: int = 15
 
 
 # ── Utilidades matemáticas ─────────────────────────────────────────────────
@@ -192,20 +194,14 @@ def evaluar_k_particion(
 ) -> float:
     """
     Calcula la pérdida EMD de una k-partición usando semántica IIT estricta y 
-    las distribuciones conjuntas totales (de tamaño 2^N).
+    las distribuciones conjuntas (que se reconstruyen al vuelo para N > 20).
 
     Definición matemática:
     ──────────────────────
     Para una k-partición {S1,...,Sk}, cada parte Si es causalmente independiente.
-    La distribución reconstruida del sistema k-particionado asigna a cada nodo j ∈ Si:
-
-        dist_rec[j] = 1 - P(Xj=1 | estado_Si,t)
-
-    donde P(Xj=1 | estado_Si,t) se obtiene marginalizando el ncubo_j sobre todos
-    los dims que NO pertenecen a Si, y evaluando en estado_inicial[Si].
     
-    Luego, P = ⊗_i P(nodo i en sistema total) de tamaño 2^N
-    Y se construye Q = ⊗_i P(nodo i en sistema particionado) de tamaño 2^N
+    Para N ≤ 20: Usa el cálculo exacto construyendo distribuciones de tamaño 2^N.
+    Para N > 20: Usa la versión optimizada con muestreo para evitar OOM.
 
     Args:
         subsistema    : System ya condicionado/substradido.
@@ -239,15 +235,23 @@ def evaluar_k_particion(
         for idx_pos in parte:
             dist_reconstruida[idx_pos] = dist_parte[idx_pos]
 
-    # Ambos tensores se forman asumiendo independencia entre marginales (tensor product).
-    # Matemáticamente es indispensable generar el tensor de tamaño 2^N para conservar la causalidad 
-    # estructural requerida por la métrica EMD de la Teoría de la Información Integrada originada en PyPhi.
-    # Evitamos construir meshgrids línea por línea e invocamos la función de utilería matemática.
-    dist_P_conjunta = distribucion_conjunta_vectorizada(dist_original)
-    dist_Q_conjunta = distribucion_conjunta_vectorizada(dist_reconstruida)
-
-    # Calculamos EMD usando la función base (con precalculo de penalidad de Hamming)
-    return float(emd_causal(dist_P_conjunta, dist_Q_conjunta))
+    # ────────────────────────────────────────────────────────────────────
+    # Cálculo optimizado del EMD según el tamaño de N
+    # ────────────────────────────────────────────────────────────────────
+    if n <= 20:
+        # Para N ≤ 20 (hasta ~1M estados), usar cálculo exacto
+        from src.controllers.strategies.kgeomip import distribucion_conjunta_vectorizada
+        dist_P_conjunta = distribucion_conjunta_vectorizada(dist_original)
+        dist_Q_conjunta = distribucion_conjunta_vectorizada(dist_reconstruida)
+        return float(emd_causal(dist_P_conjunta, dist_Q_conjunta))
+    else:
+        # Para N > 20, usar versión optimizada con muestreo
+        return emd_causal_fast_partition(
+            dist_original=dist_original,
+            dist_reconstruida=dist_reconstruida,
+            n_nodos=n,
+            use_marginal=False
+        )
 
 
 
@@ -332,13 +336,24 @@ class KGeoMIP(SIA):
         Encuentra la Participación de Mínima Información ÓPTIMA GLOBAL (Optimal K-MIP).
         Itera sobre todos los k (desde 2 hasta N) y elige la partición
         con la mínima pérdida EMD para cumplir con el requisito formal del proyecto.
+        
+        Para N > 20, utiliza automáticamente cálculo de EMD optimizado con muestreo
+        para evitar colapso de memoria.
         """
 
         self.logger.critic(f"Iniciando KGeoMIP para búsqueda de k global óptimo.")
         self.sia_preparar_subsistema(condicion, alcance, mecanismo, tpm)
 
         n_vars = len(self.sia_subsistema.indices_ncubos)
-
+        
+        # Advertencia de rendimiento para N grande
+        if n_vars > 20:
+            self.logger.critic(
+                f"⚠️  MODO OPTIMIZADO ACTIVADO: N={n_vars} variables detectadas.\n"
+                f"   Se utilizará cálculo de EMD con muestreo para evitar OOM.\n"
+                f"   Los resultados son aproximaciones de alta precisión."
+            )
+        
         # Caso trivial: si n <= 1
         if n_vars <= 1:
             particion_optima = tuple([i] for i in range(n_vars))
@@ -357,11 +372,16 @@ class KGeoMIP(SIA):
             
             # Evaluar todas las K posibles desde 2 hasta n_vars
             for test_k in range(2, n_vars + 1):
+                self.logger.critic(f"━━━ EVALUANDO K={test_k} (n_vars * k = {n_vars * test_k}, UMBRAL = {UMBRAL_EXHAUSTIVO}) ━━━")
+                
                 if n_vars * test_k <= UMBRAL_EXHAUSTIVO:
+                    self.logger.critic(f"  → Usando BÚSQUEDA EXHAUSTIVA")
                     part_k = self._busqueda_exhaustiva(test_k)
                 else:
+                    self.logger.critic(f"  → Usando AGRUPAMIENTO JERÁRQUICO")
                     part_k = self._agrupamiento_jerarquico(test_k)
                 
+                self.logger.critic(f"  → Calculando EMD para partición k={test_k}...")
                 perdida_k = evaluar_k_particion(
                     self.sia_subsistema,
                     self.sia_subsistema.indices_ncubos,
@@ -377,13 +397,19 @@ class KGeoMIP(SIA):
                     "particion_grafica": fmt_pk
                 })
                 
+                self.logger.critic(f"  → K={test_k}: Pérdida = {perdida_k:.6f}")
+                
                 if perdida_k < mejor_perdida:
                     mejor_perdida = perdida_k
                     particion_optima = part_k
                     k_optimo = test_k
+                    self.logger.critic(f"  ✓ NUEVA MEJOR PARTICIÓN: k={test_k} con pérdida={mejor_perdida:.6f}")
                     
                     if mejor_perdida == 0.0:  # Optimización, no se puede mejorar 0.0
+                        self.logger.critic(f"  → Pérdida 0.0 encontrada, deteniendo búsqueda")
                         break
+                
+                self.logger.critic(f"✓ K={test_k} COMPLETADO\n")
 
             # Distribución reconstruida para el Solution con la partición óptima
             dist_reconstruida = np.empty(len(self.sia_dists_marginales), dtype=np.float32)
@@ -592,6 +618,12 @@ class KGeoMIP(SIA):
             Tupla de k listas de índices.
         """
         n_vars = len(self.sia_subsistema.indices_ncubos)
+        
+        if k > n_vars:
+            raise ValueError(f"k={k} no puede ser mayor que n_vars={n_vars}")
+        if k < 1:
+            raise ValueError(f"k={k} debe ser al menos 1")
+        
         # Empieza con n particiones independientes
         particiones: List[List[int]] = [[i] for i in range(n_vars)]
 
@@ -610,10 +642,17 @@ class KGeoMIP(SIA):
             )
             return (perdida, i, j, nueva_parte)
 
+        # Fusionar hasta alcanzar k particiones
+        iteracion_num = 0
         while len(particiones) > k:
+            iteracion_num += 1
             n_partes = len(particiones)
             pares_a_evaluar = [(i, j) for i in range(n_partes) for j in range(i + 1, n_partes)]
 
+            if not pares_a_evaluar:
+                self.logger.critic(f"  ADVERTENCIA: No hay pares a evaluar pero len(particiones)={n_partes} > k={k}")
+                break
+            
             resultados = Parallel(n_jobs=-1)(
                 delayed(evaluar_fusion)(i, j, particiones) for i, j in pares_a_evaluar
             )
@@ -632,5 +671,7 @@ class KGeoMIP(SIA):
                 f"Jerárquico (Bottom-Up): Fusionadas partes {(i_idx, j_idx)} -> {mejor_union}. "
                 f"Particiones restantes: {len(particiones)}, Pérdida: {mejor_perdida:.6f}"
             )
-
-        return tuple(particiones)
+        
+        self.logger.critic(f"  → Agrupamiento jerárquico para k={k} TERMINADO (iteraciones: {iteracion_num})")
+        resultado = tuple(particiones)
+        return resultado

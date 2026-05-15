@@ -58,6 +58,6 @@ build/
 /review
 .logs
 .assets
-/data
+/GeoMIP/data/samples
 /results
-/.samples
+
