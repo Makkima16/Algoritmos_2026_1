@@ -69,6 +69,11 @@ def get_hamming_matrix(n: int) -> NDArray[np.float64]:
     Args:
         n (int): The dimensions of the distribution (2^n states typically, but could be number of bins).
     """
+    # Para N >= 13 nodos, la distribución conjunta tiene 2^N >= 8192 estados
+    # y la matriz (2^N × 2^N) supera 512 MB. Rechazar para forzar uso de EMD rápida.
+    if n > 4096:
+        raise MemoryError(f"No se puede evaluar EMD clásica con tamaño {n}x{n} por memoria.")
+        
     if n not in _HAMMING_CACHE:
         costs = np.empty((n, n), dtype=np.float64)
         for i in range(n):
