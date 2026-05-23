@@ -6,9 +6,10 @@ import multiprocessing
 
 
 class SystemCreator:
-    def __init__(self, N: int):
+    def __init__(self, N: int, deterministic: bool = False):
         self.N = N
         self.num_states = 2**N
+        self.deterministic = deterministic
 
         # Calcular el tamaño real en memoria considerando float64 (8 bytes por número)
         total_size_gb = (self.num_states * self.N * 8) / (1024**3)
@@ -29,25 +30,29 @@ class SystemCreator:
         print('Generando estados (probabilidades correlacionadas)...')
         start_time = time.time()
         
-        # 1. Generar matriz de probabilidades base evitando el ruido blanco puro (0.5 puro)
-        self.states = np.random.uniform(0.2, 0.8, size=(self.num_states, N))
-        
-        # 2. Introducir Correlación: Dependencia del valor j respecto a los bits del estado actual
-        # Obtenemos la representación binaria de cada fila (estado)
-        state_indices = np.arange(self.num_states)[:, np.newaxis]
-        shifts = np.arange(N - 1, -1, -1)
-        binary_states = (state_indices >> shifts) & 1
-        
-        # Hacemos que cada nodo dependa de sus vecinos en la cadena de bits para crear una alta integración
-        left_neighbors = np.roll(binary_states, shift=1, axis=1)
-        right_neighbors = np.roll(binary_states, shift=-1, axis=1)
-        
-        # Ajustamos las probabilidades base según la activación de los nodos circundantes
-        self.states += 0.15 * left_neighbors
-        self.states -= 0.10 * right_neighbors
-        
-        # Garantizamos que las probabilidades se mantengan en el rango (0, 1) excluyente para emd
-        self.states = np.clip(self.states, 0.000001, 0.999999)
+        if self.deterministic:
+            # Para sistemas determinísticos, las probabilidades son exactamente 0 o 1
+            self.states = np.random.randint(0, 2, size=(self.num_states, N)).astype(float)
+        else:
+            # 1. Generar matriz de probabilidades base evitando el ruido blanco puro (0.5 puro)
+            self.states = np.random.uniform(0.2, 0.8, size=(self.num_states, N))
+            
+            # 2. Introducir Correlación: Dependencia del valor j respecto a los bits del estado actual
+            # Obtenemos la representación binaria de cada fila (estado)
+            state_indices = np.arange(self.num_states)[:, np.newaxis]
+            shifts = np.arange(N - 1, -1, -1)
+            binary_states = (state_indices >> shifts) & 1
+            
+            # Hacemos que cada nodo dependa de sus vecinos en la cadena de bits para crear una alta integración
+            left_neighbors = np.roll(binary_states, shift=1, axis=1)
+            right_neighbors = np.roll(binary_states, shift=-1, axis=1)
+            
+            # Ajustamos las probabilidades base según la activación de los nodos circundantes
+            self.states += 0.15 * left_neighbors
+            self.states -= 0.10 * right_neighbors
+            
+            # Garantizamos que las probabilidades se mantengan en el rango (0, 1) excluyente para emd
+            self.states = np.clip(self.states, 0.000001, 0.999999)
         
         elapsed = time.time() - start_time
         print(f'Generación completada en {elapsed:.2f} segundos')
@@ -58,7 +63,10 @@ class SystemCreator:
         return self.states[:, dimension]
 
     def save_to_csv(self, filename: str = None):
-        target_dir = os.path.join('GeoMIP', 'data', 'samples')
+        if self.deterministic:
+            target_dir = os.path.join('GeoMIP', 'data', 'samples_binary')
+        else:
+            target_dir = os.path.join('GeoMIP', 'data', 'samples_no_binary')
         os.makedirs(target_dir, exist_ok=True)
 
         if filename is None:
@@ -85,11 +93,11 @@ class SystemCreator:
         print(f'Tiempo de guardado: {elapsed:.2f} segundos')
 
 
-def generate_and_save(N: int):
-    print(f'\nGenerando sistema con N={N}...')
+def generate_and_save(N: int, deterministic: bool = False):
+    print(f'\nGenerando sistema con N={N} (Determinístico: {deterministic})...')
     start_total = time.time()
 
-    system = SystemCreator(N)
+    system = SystemCreator(N, deterministic=deterministic)
     system.save_to_csv()
 
     total_time = time.time() - start_total
@@ -101,8 +109,12 @@ if __name__ == '__main__':
     try:
         n_str = input('\nIngrese el número de variables (N) para el sistema: ').strip()
         n_val = int(n_str)
+        
+        det_str = input('¿Desea que la TPM sea determinística (solo 0 y 1)? (s/n): ').strip().lower()
+        deterministic = (det_str == 's')
+        
         # Generar un sistema que sea un reto real computacional sin saturar el cálculo de EMD.
-        system = generate_and_save(n_val)
+        system = generate_and_save(n_val, deterministic=deterministic)
 
     except ValueError:
         print('\nError: Por favor ingrese un número entero válido.')

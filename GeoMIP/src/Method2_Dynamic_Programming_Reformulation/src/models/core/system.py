@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -23,20 +25,30 @@ class System:
 
     def __init__(
         self,
-        tpm: np.ndarray,
+        tpm: np.ndarray | "LazyTPM",
         estado_inicio: np.ndarray,
         notacion: str = aplicacion.notacion,
     ):
-        if estado_inicio.size != (n_nodes := tpm.shape[COLS_IDX]):
+        is_lazy_tpm = hasattr(tpm, 'marginal_nodo')
+        if hasattr(tpm, 'shape'):
+            n_nodes = tpm.shape[COLS_IDX]
+        else:
+            n_nodes = tpm.n_nodos
+
+        if estado_inicio.size != n_nodes:
             raise ValueError(f"Estado inicial debe tener longitud {n_nodes}")
         self.estado_inicial = estado_inicio
+        
+        def _obtener_columna(idx):
+            return tpm.marginal_nodo(idx) if is_lazy_tpm else tpm[:, idx]
+
         self.ncubos = tuple(
             NCube(
                 indice=i,
                 dims=np.array(range(n_nodes), dtype=np.int8),
-                data=tpm[:, i].reshape((2,) * n_nodes)
+                data=_obtener_columna(i).reshape((2,) * n_nodes)
                 if notacion == Notation.LIL_ENDIAN.value
-                else tpm[:, i][reindexar(tpm[COLS_IDX])].reshape((2,) * n_nodes),
+                else _obtener_columna(i)[reindexar(n_nodes)].reshape((2,) * n_nodes),
             )
             for i in range(n_nodes)
         )

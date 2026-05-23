@@ -35,8 +35,8 @@ def emd_causal_sampled(
     """
     n_total = len(u)
     
-    # Si es manejable, usar EMD exacto (n <= 32768)
-    if n_total <= 32768:
+    # EMD exacto solo hasta distribuciones de 4096 elementos (N <= 12 nodos → 128 MB)
+    if n_total <= 4096:
         from src.funcs.base import emd_causal as emd_causal_exact
         return emd_causal_exact(u, v)
     
