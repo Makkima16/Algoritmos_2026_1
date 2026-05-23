@@ -1,0 +1,94 @@
+{
+    "dataset": "N12A.csv",
+    "estado_inicial": "110010101000",
+    "estrategia": "KGeoMIP(Global Optimal K=4)",
+    "perdida_phi": 1.1975571438670156,
+    "fundamento_eleccion": "Se seleccionó esta k-partición porque presenta la pérdida de información (EMD) mínima global de todo el abanico evaluado.",
+    "distribucion_subsistema": [
+        0.0507970005273819,
+        0.5068070292472839,
+        0.7321199774742126,
+        0.21738000214099884,
+        0.4899890124797821,
+        0.5318790078163147,
+        0.3549329936504364,
+        0.6099299788475037,
+        0.10259199887514114,
+        0.5786870121955872,
+        0.6274790167808533,
+        0.5791820287704468
+    ],
+    "distribucion_particion": [
+        0.27738499641418457,
+        0.4817603528499603,
+        0.6900610327720642,
+        0.4920536279678345,
+        0.45826593041419983,
+        0.5044847130775452,
+        0.39991503953933716,
+        0.5497170090675354,
+        0.2782300114631653,
+        0.5060189366340637,
+        0.6235960721969604,
+        0.3664935529232025
+    ],
+    "particion": "| B || G || F,H || D,J,E,L,I,A,C,K |\n| b || g || f,h || d,j,e,l,i,a,c,k |",
+    "historico_comparaciones": [
+        {
+            "k": 2,
+            "perdida": 1.213788203895092,
+            "particion_grafica": "| D,J,E,L,I,A,C,K || F,H,B,G |\n| d,j,e,l,i,a,c,k || f,h,b,g |"
+        },
+        {
+            "k": 3,
+            "perdida": 1.2017752751708024,
+            "particion_grafica": "| F,H || D,J,E,L,I,A,C,K || B,G |\n| f,h || d,j,e,l,i,a,c,k || b,g |"
+        },
+        {
+            "k": 4,
+            "perdida": 1.1975571438670156,
+            "particion_grafica": "| B || G || F,H || D,J,E,L,I,A,C,K |\n| b || g || f,h || d,j,e,l,i,a,c,k |"
+        },
+        {
+            "k": 5,
+            "perdida": 1.294251285493373,
+            "particion_grafica": "| B || D || G || F,H || J,E,L,I,A,C,K |\n| b || d || g || f,h || j,e,l,i,a,c,k |"
+        },
+        {
+            "k": 6,
+            "perdida": 1.3476024493575092,
+            "particion_grafica": "| B || D || G || J || F,H || E,L,I,A,C,K |\n| b || d || g || j || f,h || e,l,i,a,c,k |"
+        },
+        {
+            "k": 7,
+            "perdida": 1.4003472551703444,
+            "particion_grafica": "| B || D || E || G || J || F,H || L,I,A,C,K |\n| b || d || e || g || j || f,h || l,i,a,c,k |"
+        },
+        {
+            "k": 8,
+            "perdida": 1.429123394191265,
+            "particion_grafica": "| B || D || E || G || J || L || F,H || I,A,C,K |\n| b || d || e || g || j || l || f,h || i,a,c,k |"
+        },
+        {
+            "k": 9,
+            "perdida": 1.5429385527968404,
+            "particion_grafica": "| B || D || E || G || I || J || L || F,H || A,C,K |\n| b || d || e || g || i || j || l || f,h || a,c,k |"
+        },
+        {
+            "k": 10,
+            "perdida": 1.6574307307600975,
+            "particion_grafica": "| A || B || D || E || G || I || J || L || C,K || F,H |\n| a || b || d || e || g || i || j || l || c,k || f,h |"
+        },
+        {
+            "k": 11,
+            "perdida": 1.8123437091708177,
+            "particion_grafica": "| A || B || D || E || F || G || H || I || J || L || C,K |\n| a || b || d || e || f || g || h || i || j || l || c,k |"
+        },
+        {
+            "k": 12,
+            "perdida": 1.9678065404295906,
+            "particion_grafica": "| A || B || C || D || E || F || G || H || I || J || K || L |\n| a || b || c || d || e || f || g || h || i || j || k || l |"
+        }
+    ],
+    "tiempo_total": 481.4160168170929
+}

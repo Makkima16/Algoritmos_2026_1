@@ -658,7 +658,7 @@ class KGeoMIP(SIA):
         alcance: str,
         mecanismo: str,
         tpm: np.ndarray,
-        k: Optional[int] = None,
+        k: Optional[int] = None, # k is deprecated since we search ALL, kept for signature
     ) -> Solution:
         """
         Encuentra la Participación de Mínima Información ÓPTIMA GLOBAL (Optimal K-MIP).
