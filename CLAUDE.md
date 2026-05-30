@@ -79,17 +79,46 @@ exec.py
 
 Todo el código depende del mismo entorno virtual (`.venv/`) con Python >= 3.11.
 
-**Ejecutar ventana GeoMIP interactivo:**
+**Ejecutar GeoMIP (elige modo al inicio):**
 ```bash
 source .venv/Scripts/activate
 python GeoMIP/src/Method2_Dynamic_Programming_Reformulation/exec_kgeomip.py
 ```
+
+Al ejecutar se ofrece:
+- **Modo 1 — Manual**: ingreso interactivo de candidato, estado, alcance, mecanismo y K.
+- **Modo 2 — Por bloque**: selecciona un CSV de pruebas y guarda los resultados en el destino indicado.
+
+Formato del CSV para modo bloque (`GeoMIP/data/pruebas_ejemplo.csv`):
+```
+#prueba,alcance,mecanismo,k
+1,1111111111,1111111111,
+2,1110000000,1111111111,2
+```
+El candidato y el estado inicial se piden una sola vez para todo el lote.
+Los resultados se guardan como JSON en la ruta que el usuario indique.
+La partición se almacena con su formato de dos líneas (futuros/presentes).
+El tiempo se reporta en s / min s / h min s según su magnitud.
 
 **Ejecutar QNodes con profiling activado (según su config global):**
 ```bash
 source .venv/Scripts/activate
 python QNodes/exec.py
 ```
+
+---
+
+## Diferencias Clave de k-MIP (vs Prototipo Antiguo)
+
+AYDA reimplementa estructuralmente la búsqueda y evaluación de k-particiones óptimas integrando rigor topológico-probabilístico sobre las heurísticas originales.
+
+| Criterio | `projecto-analisis-20261` (Antiguo) | `AYDA_2026_1` (Nuevo) |
+|----------|---------------------------------------|-------------------------|
+| **Cálculo EMD (Métrica)** | Distancia simple tipo L1 (`emd_efecto`) sumando las diferencias aisladas de variables de causa/efecto marginales. Generaba valores artificialmente bajos $φ$. | Verdadera Earth Mover's Distance (`emd_causal`) interlazada mediante PyEMD sobre el espacio probabilístico conjunto con base de Distancia de Hamming. |
+| **Puntaje $φ$ Reportado** | Valores reducidos artificialmente (p.ej. $0.4$) al omitir interconexión causal cruzada de los sub-estados. | Magnitudes matemáticamente realistas sobre el espacio matricial ($φ > 1.0$) según los cortes iterativos reales. |
+| **Búsqueda Óptima** | "Hill-Climbing" simple con selección estocástica ciega inicial. | Generación de Matrices de Afinidad Geométrica (*Spectral Clustering*) + Refinamiento Local iterativo (1-move). |
+| **Manejo del "Estado Vacío"** | Los nodos quedaban causalmente destrozados en estados vacíos (Over-cutting) sin penalización alta. | Causalidad topológica conservada; el mecanismo ∅ se permite pero evalúa contra su peso probabilístico de Hamming rigurosamente (`generar_candidatos_presente_vacio`). |
+| **Arquitectura Algorítmica** | Implementación imperativa genérica para bipartir iterativamente. | Modelado OOP (`System`, `NCube`), memorización de sub-distribuciones (QNodes `DynamicPartition`), paralelismo con `ProcessPoolExecutor` y control K-múltiple por hilos locales de CPU. |
 
 ---
 

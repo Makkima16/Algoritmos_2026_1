@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(Get-ChildItem -Force)",
-      "Bash(.venv/Scripts/python.exe -c ' *)"
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m py_compile \"GeoMIP/src/Method2_Dynamic_Programming_Reformulation/exec_kgeomip.py\")",
+      "Bash(python -c ' *)"
     ]
   }
 }

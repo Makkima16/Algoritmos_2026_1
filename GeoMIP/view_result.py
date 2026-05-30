@@ -20,9 +20,7 @@ from pathlib import Path
 # ─────────────────────────────────────────────────────────────
 
 # Ruta fija del proyecto
-RESULTS_DIR = Path(
-    r"C:\universidad\Analisis y Diseño de Algoritmos\AYDA_2026_1\GeoMIP\results"
-)
+RESULTS_DIR = Path(__file__).resolve().parent / 'results'
 
 # Texto para conjuntos vacíos
 VOID_STR = "∅"

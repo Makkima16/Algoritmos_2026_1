@@ -30,12 +30,13 @@ Para medir qué tan "buena" es una partición, usamos el **Earth Mover's Distanc
 ### 2. Enfoque "Greedy" (Codicioso) Jerárquico
 Tratar de evaluar particiones k-múltiples simultáneamente es ineficiente. El gestor codicioso selecciona iterativamente el sub-sistema actual más grande y aplica una bipartición óptima sobre él, apilándolos hasta satisfacer la restricción exacta de $K$ particiones.
 
-### 3. Búsqueda Local Estocástica (Hill Climbing) - *El núcleo de la eficiencia*
-Para realizar cada bipartición (superando el `UMBRAL_EXHAUSTIVO`), inyectamos un método de **Búsqueda Local (First-Improvement Hill Climbing)**:
-*   **Estado Inicial Aleatorio:** Se asignan los nodos del subconjunto aleatoriamente a dos conjuntos A y B.
-*   **Evaluación de Vecindario $O(N)$:** El algoritmo evalúa el impacto de trasladar un único nodo del conjunto A al B (o viceversa).
-*   **Aceptación Temprana (First Improvement):** Apenas se detecta que un intercambio reduce el EMD (disminuye la pérdida de información), se acepta inmediatamente como el nuevo estado óptimo local y la búsqueda reinicia desde allí.
-*   **Mínimo Local:** Si mover cualquier nodo individual resulta en un incremento del EMD, el algoritmo converge y finaliza la bipartición. Esto reduce la exploración de tiempo exponencial a uno logarítmico/polinómico.
+### 3. Búsqueda Local Estocástica y Refinamiento (Local Search) - *El núcleo de la eficiencia*
+Para realizar la bipartición (y generalizaciones a k-particiones) tras superar el umbral exhaustivo (`UMBRAL_STIRLING`), inyectamos un híbrido de Búsqueda Heurística Global seguida de un Refinamiento Local:
+*   **Clustering sobre Grafo de Afinidad:** En lugar de aleatoriedad pura, se construye una matriz geométrica con las distancias de transición de probabilidad. Luego se emplea *Spectral Clustering* para acercarse muy rápidamente a la partición cuasi-óptima.
+*   **Aislamiento Heurístico y Nodos Vacíos (∅):** El algoritmo explora combinaciones formales donde futuros (t+1) pueden ser causados por estados presentes vacíos (la inclusión del ∅), dadas exigencias algebraicas.
+*   **Evaluación de Vecindario 1-Move (Refinamiento Local):** Tomando como base la partición heurística, el algoritmo evalúa iterativamente el traslado (swap) de *un único nodo* hacia una partición colindante.
+*   **Aceptación Temprana:** Apenas se detecta que un intercambio reduce la EMD conjunta (`emd_causal`), se acepta el nuevo estado óptimo local.
+*   **Mínimo Local:** Si mover cualquier nodo incrementa la EMD, o se agota el presupuesto de tiempo asignado, el algoritmo converge y finaliza. Esto pule enormemente el valor final de φ comparado con heurísticas superficiales.
 
 ### 4. Computación Paralela (Multiprocessing)
 El programa principal aprovecha todos los hilos del procesador aislando la evaluación de vecindarios y casos de prueba usando procesos concurrentes (`multiprocessing`), garantizando que no haya cuellos de botella por el Global Interpreter Lock (GIL) de Python.

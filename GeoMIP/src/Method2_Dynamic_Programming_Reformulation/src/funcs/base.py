@@ -7,6 +7,7 @@ import numpy as np
 from numpy.typing import NDArray
 from pyemd import emd
 
+from src.models.enums.distance import MetricDistance
 from src.models.enums.notation import Notation
 
 from src.models.base.application import aplicacion

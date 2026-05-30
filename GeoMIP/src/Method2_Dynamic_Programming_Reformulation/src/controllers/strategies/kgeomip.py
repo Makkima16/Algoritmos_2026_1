@@ -1,23 +1,21 @@
 """
 KGeoMIP — Extensión de la estrategia geométrica GeoMIP a k-particiones.
 
-PARALELIZACIÓN: 2 procesos externos fijos (ProcessPoolExecutor).
+PARALELIZACIÓN: Evaluación secuencial de k con máximo de núcleos por k.
 
-El bucle de k lanza exactamente 2 procesos simultáneos. Cada proceso recibe
-la mitad de los hilos disponibles (cpu_count // 2) para búsqueda interna
-con joblib. Esto evita saturar el portátil manteniendo concurrencia útil.
+El bucle de k evalúa cada valor secuencialmente (k=2, luego k=3, ...).
+Cada k usa cpu_count-1 núcleos para la búsqueda interna con joblib.
+Esto evita dividir recursos entre k's y maximiza el rendimiento por tarea.
 
-NOTA sobre joblib vs concurrent.futures:
-  - El bucle de k usa ProcessPoolExecutor (procesos reales, evita el GIL).
-  - Los métodos internos (_busqueda_exhaustiva, _agrupamiento_jerarquico)
-    usan joblib con n_jobs = cpu_count // MAX_WORKERS_K.
+NOTA sobre joblib:
+  - Los métodos internos (_busqueda_exhaustiva, _agrupamiento_jerarquico,
+    _refinar_particion_local) usan joblib con n_jobs = N_JOBS_INTERNOS.
 """
 
 import time
 import itertools
 from math import comb
 from typing import List, Tuple, Dict, Optional
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 
 import numpy as np
@@ -55,9 +53,10 @@ KGEOMIP_ANALYSIS_TAG: str = f"{KGEOMIP_LABEL}_analysis"
 # Mantenido en 20 para forzar el Aislamiento Heurístico desde tamaños moderados.
 UMBRAL_STIRLING: int = 3_000
 
-# 2 procesos externos fijos: cada uno recibe la mitad de los hilos disponibles.
-MAX_WORKERS_K: int = 2
-N_JOBS_INTERNOS: int = max(1, multiprocessing.cpu_count() // MAX_WORKERS_K)
+# Mantener la posibilidad de que una parte tenga mecanismo vacío (∅).
+PERMITIR_PRESENTE_VACIO_POR_DEFECTO: bool = True
+
+N_JOBS_INTERNOS: int = max(1, multiprocessing.cpu_count() - 1)
 
 
 # ── Utilidades matemáticas ─────────────────────────────────────────────────
@@ -194,6 +193,105 @@ def _generar_candidatos_presente_vacio(
     return candidatos
 
 
+def _refinar_particion_local(
+    subsistema,
+    indices_ncubos: np.ndarray,
+    dims_ncubos: np.ndarray,
+    particion_inicial: Tuple[List[int], ...],
+    dist_original: np.ndarray,
+    permitir_presente_vacio: bool,
+    tiempo_maximo_segundos: Optional[float] = None,
+) -> tuple[float, Tuple[List[int], ...]]:
+    """
+    Refinamiento local por vecindad 1-move sobre una k-partición.
+
+    Explora movimientos de un nodo entre bloques y, si se permite, la variante
+    con mecanismo vacío para bloques unitarios.
+    """
+    inicio = time.perf_counter()
+
+    def agotado() -> bool:
+        if tiempo_maximo_segundos is None:
+            return False
+        return (time.perf_counter() - inicio) >= tiempo_maximo_segundos
+
+    def normalizar(particion: Tuple[List[int], ...]) -> list[list[int]]:
+        partes: list[list[int]] = []
+        for parte in particion:
+            if parte and parte[0] == -1:
+                partes.append(list(parte))
+            else:
+                partes.append(list(parte))
+        return partes
+
+    def evaluar(particion: Tuple[List[int], ...]) -> float:
+        return evaluar_k_particion(
+            subsistema,
+            indices_ncubos,
+            dims_ncubos,
+            particion,
+            dist_original,
+        )
+
+    mejor_particion = tuple(list(parte) for parte in particion_inicial)
+    mejor_perdida = evaluar(mejor_particion)
+    mejoro = True
+
+    while mejoro and not agotado():
+        mejoro = False
+        partes_base = normalizar(mejor_particion)
+        vecinos: list[Tuple[List[int], ...]] = []
+        vistos: set[tuple] = set()
+
+        for i, parte_origen in enumerate(partes_base):
+            if parte_origen and parte_origen[0] == -1:
+                parte_origen = parte_origen[1:]
+            if len(parte_origen) <= 1:
+                continue
+
+            for nodo_idx, nodo in enumerate(parte_origen):
+                for j in range(len(partes_base)):
+                    if i == j:
+                        continue
+                    candidato = [list(parte) for parte in partes_base]
+                    candidato[i].remove(nodo)
+                    if not candidato[i]:
+                        continue
+                    candidato[j].append(nodo)
+                    tupla_candidato = tuple(tuple(parte) for parte in candidato)
+                    if tupla_candidato not in vistos:
+                        vecinos.append(tupla_candidato)
+                        vistos.add(tupla_candidato)
+
+        if permitir_presente_vacio:
+            for idx_parte, parte in enumerate(partes_base):
+                parte_real = parte[1:] if parte and parte[0] == -1 else parte
+                if len(parte_real) != 1:
+                    continue
+                candidato = [list(parte) for parte in partes_base]
+                candidato[idx_parte] = [-1, parte_real[0]]
+                tupla_candidato = tuple(tuple(parte) for parte in candidato)
+                if tupla_candidato not in vistos:
+                    vecinos.append(tupla_candidato)
+                    vistos.add(tupla_candidato)
+
+        if agotado() or not vecinos:
+            break
+
+        resultados = Parallel(n_jobs=min(len(vecinos), N_JOBS_INTERNOS), prefer="threads")(
+            delayed(evaluar)(vecino) for vecino in vecinos
+        )
+        idx_mejor = int(np.argmin(resultados))
+        perdida_mejor_vecino = float(resultados[idx_mejor])
+
+        if perdida_mejor_vecino + 1e-12 < mejor_perdida:
+            mejor_perdida = perdida_mejor_vecino
+            mejor_particion = vecinos[idx_mejor]
+            mejoro = True
+
+    return mejor_perdida, mejor_particion
+
+
 def distribucion_conjunta_vectorizada(probabilidades: np.ndarray) -> np.ndarray:
     """
     Construye la distribución conjunta P de tamaño 2^N a partir de N probabilidades marginales p_i.
@@ -248,7 +346,7 @@ def evaluar_k_particion(
             dist_original=dist_original,
             dist_reconstruida=dist_reconstruida,
             n_nodos=n,
-            use_marginal=False
+            use_marginal=True
         )
 
 def _serializar_particion(
@@ -467,6 +565,8 @@ def _evaluar_k_completo(
     n_vars: int,
     n_jobs_internos: int,
     matriz_afinidad: Optional[np.ndarray] = None,
+    permitir_presente_vacio: bool = PERMITIR_PRESENTE_VACIO_POR_DEFECTO,
+    tiempo_maximo_segundos: Optional[float] = None,
 ) -> dict:
     """
     Evalúa un valor específico de k y retorna su resultado.
@@ -488,7 +588,7 @@ def _evaluar_k_completo(
         dict con claves: k, perdida, particion, particion_grafica, error.
     """
     try:
-        if stirling2(n_vars, k) <= 20:
+        if stirling2(n_vars, k) <= UMBRAL_STIRLING:
             # ── Búsqueda Exhaustiva con paralelismo joblib ───────────────────
             elementos = list(range(n_vars))
 
@@ -500,7 +600,7 @@ def _evaluar_k_completo(
                 return (perdida, particion)
 
             iterador = generar_k_particiones(elementos, k)
-            resultados = Parallel(n_jobs=n_jobs_internos)(
+            resultados = Parallel(n_jobs=n_jobs_internos, prefer="threads")(
                 delayed(evaluar_en_proceso)(p) for p in iterador
             )
 
@@ -510,6 +610,17 @@ def _evaluar_k_completo(
                 if perdida < mejor_perdida:
                     mejor_perdida = perdida
                     mejor_particion = particion
+
+            if permitir_presente_vacio:
+                mejor_perdida, mejor_particion = _refinar_particion_local(
+                    subsistema,
+                    indices_ncubos,
+                    dims_ncubos,
+                    mejor_particion,
+                    dists_marginales,
+                    permitir_presente_vacio=True,
+                    tiempo_maximo_segundos=tiempo_maximo_segundos,
+                )
 
         else:
             # ── Clustering de Grafo de Hipercubo + Aislamiento Heurístico ───
@@ -534,13 +645,15 @@ def _evaluar_k_completo(
 
             # Agregar variantes con mecanismo vacío (∅) para los nodos aislados.
             # Captura el caso donde el futuro es causalmente independiente del presente.
-            for c_vac in _generar_candidatos_presente_vacio(n_vars, k):
-                if c_vac not in candidatos_geo:
-                    candidatos_geo.append(c_vac)
+            if permitir_presente_vacio:
+                for c_vac in _generar_candidatos_presente_vacio(n_vars, k):
+                    if c_vac not in candidatos_geo:
+                        candidatos_geo.append(c_vac)
 
             if candidatos_geo:
                 perdidas_candidatos = Parallel(
-                    n_jobs=min(len(candidatos_geo), n_jobs_internos)
+                    n_jobs=min(len(candidatos_geo), n_jobs_internos),
+                    prefer="threads",
                 )(
                     delayed(evaluar_k_particion)(
                         subsistema, indices_ncubos, dims_ncubos,
@@ -551,6 +664,20 @@ def _evaluar_k_completo(
                 mejor_idx = int(np.argmin(perdidas_candidatos))
                 mejor_perdida = float(perdidas_candidatos[mejor_idx])
                 mejor_particion = candidatos_geo[mejor_idx]
+
+                if tiempo_maximo_segundos is None or tiempo_maximo_segundos > 0:
+                    refinar_con_segundos = tiempo_maximo_segundos
+                    if refinar_con_segundos is not None:
+                        refinar_con_segundos = max(0.0, refinar_con_segundos * 0.25)
+                    mejor_perdida, mejor_particion = _refinar_particion_local(
+                        subsistema,
+                        indices_ncubos,
+                        dims_ncubos,
+                        mejor_particion,
+                        dists_marginales,
+                        permitir_presente_vacio=permitir_presente_vacio,
+                        tiempo_maximo_segundos=refinar_con_segundos,
+                    )
 
             else:
                 # Fallback: jerárquico bottom-up (solo si el grafo falla)
@@ -575,7 +702,7 @@ def _evaluar_k_completo(
                              for j in range(i + 1, n_partes)]
                     if not pares:
                         break
-                    resultados = Parallel(n_jobs=n_jobs_internos)(
+                    resultados = Parallel(n_jobs=n_jobs_internos, prefer="threads")(
                         delayed(evaluar_fusion)(i, j, particiones) for i, j in pares
                     )
                     mejor_perdida_fusion, i_idx, j_idx, mejor_union = min(
@@ -659,6 +786,8 @@ class KGeoMIP(SIA):
         mecanismo: str,
         tpm: np.ndarray,
         k: Optional[int] = None,
+        permitir_presente_vacio: bool = PERMITIR_PRESENTE_VACIO_POR_DEFECTO,
+        tiempo_maximo_segundos: Optional[float] = None,
     ) -> Solution:
         """
         Encuentra la Participación de Mínima Información ÓPTIMA GLOBAL (Optimal K-MIP).
@@ -668,6 +797,7 @@ class KGeoMIP(SIA):
         Para N > 20, utiliza automáticamente cálculo de EMD optimizado con muestreo
         para evitar colapso de memoria.
         """
+        self.memoria_particiones.clear()
         self.logger.critic("Iniciando KGeoMIP con bucle de k PARALELIZADO.")
         self.sia_preparar_subsistema(condicion, alcance, mecanismo, tpm)
 
@@ -717,6 +847,8 @@ class KGeoMIP(SIA):
                         len(self.sia_subsistema.indices_ncubos),
                         n_jobs_internos,
                         self._matriz_afinidad,
+                        permitir_presente_vacio=permitir_presente_vacio,
+                        tiempo_maximo_segundos=tiempo_maximo_segundos,
                     )
                     if resultado["error"]:
                         self.logger.critic(f"  ✗ K={k} falló: {resultado['error']}")
@@ -733,27 +865,23 @@ class KGeoMIP(SIA):
 
             else:
                 # ═══════════════════════════════════════════════════════════
-                # MODO MÚLTIPLE K: ProcessPoolExecutor paraleliza varios k's
+                # MODO MÚLTIPLE K: Evaluación secuencial k=2..N
+                # Cada k usa todos los núcleos (N_JOBS_INTERNOS = cpu_count-1)
+                # para maximizar recursos en una sola tarea a la vez.
                 # ═══════════════════════════════════════════════════════════
-                n_workers = min(MAX_WORKERS_K, len(self.sia_subsistema.indices_ncubos) - 1)
                 n_jobs_internos = N_JOBS_INTERNOS
-
-                self.logger.critic(
-                    f"🔀 MODO MÚLTIPLE K: {n_workers} workers × "
-                    f"{n_jobs_internos} hilos = "
-                    f"{n_workers * n_jobs_internos} hilos totales."
-                )
-
                 valores_k = list(range(2, min(6, len(self.sia_subsistema.indices_ncubos) + 1)))
+
                 self.logger.critic(
-                    f"Evaluando k = {valores_k[0]}..{valores_k[-1]} en paralelo..."
+                    f"🔁 MODO MÚLTIPLE K: Evaluación secuencial k={valores_k[0]}..{valores_k[-1]} "
+                    f"con {n_jobs_internos} núcleos por k."
                 )
 
                 resultados_k: List[dict] = []
-                with ProcessPoolExecutor(max_workers=n_workers) as executor:
-                    futures = {
-                        executor.submit(
-                            _evaluar_k_completo,
+                for test_k in valores_k:
+                    self.logger.critic(f"  → Evaluando K={test_k}...")
+                    try:
+                        resultado = _evaluar_k_completo(
                             test_k,
                             self.sia_subsistema,
                             self.sia_subsistema.indices_ncubos,
@@ -762,33 +890,25 @@ class KGeoMIP(SIA):
                             len(self.sia_subsistema.indices_ncubos),
                             n_jobs_internos,
                             self._matriz_afinidad,
-                        ): test_k
-                        for test_k in valores_k
-                    }
-
-                    for future in as_completed(futures):
-                        test_k = futures[future]
-                        try:
-                            resultado = future.result()
-                            if resultado["error"]:
-                                self.logger.critic(
-                                    f"  ✗ K={test_k} falló: {resultado['error']}"
-                                )
-                            else:
-                                self.logger.critic(
-                                    f"  ✓ K={test_k} completado → "
-                                    f"pérdida={resultado['perdida']:.6f}"
-                                )
-                            resultados_k.append(resultado)
-                        except Exception as exc:
-                            self.logger.critic(f"  ✗ K={test_k} excepción: {exc}")
-                            resultados_k.append({
-                                "k": test_k,
-                                "perdida": float("inf"),
-                                "particion": None,
-                                "particion_grafica": "",
-                                "error": str(exc),
-                            })
+                            permitir_presente_vacio,
+                            tiempo_maximo_segundos,
+                        )
+                        if resultado["error"]:
+                            self.logger.critic(f"  ✗ K={test_k} falló: {resultado['error']}")
+                        else:
+                            self.logger.critic(
+                                f"  ✓ K={test_k} completado → pérdida={resultado['perdida']:.6f}"
+                            )
+                        resultados_k.append(resultado)
+                    except Exception as exc:
+                        self.logger.critic(f"  ✗ K={test_k} excepción: {exc}")
+                        resultados_k.append({
+                            "k": test_k,
+                            "perdida": float("inf"),
+                            "particion": None,
+                            "particion_grafica": "",
+                            "error": str(exc),
+                        })
             # ── Registrar histórico y elegir el mejor ──────────────────────
             self.historico_particiones = []
             mejor_perdida = float("inf")
@@ -874,6 +994,7 @@ class KGeoMIP(SIA):
         La tabla se almacena en self.tabla_transiciones para ser consultada
         durante la identificación de candidatos.
         """
+        self.tabla_transiciones.clear()
         # Paso 1: aplanar los hipercubos a vectores 1D para acceso por índice entero.
         self._flat_data = [
             ncubo.data.ravel()
@@ -1033,7 +1154,7 @@ class KGeoMIP(SIA):
             return (perdida, particion)
 
         iterador_particiones = generar_k_particiones(elementos, k)
-        resultados = Parallel(n_jobs=N_JOBS_INTERNOS)(
+        resultados = Parallel(n_jobs=N_JOBS_INTERNOS, prefer="threads")(
             delayed(evaluar_en_proceso)(p) for p in iterador_particiones
         )
 
@@ -1105,7 +1226,7 @@ class KGeoMIP(SIA):
                 self.logger.critic(f"  ADVERTENCIA: No hay pares a evaluar pero len(particiones)={n_partes} > k={k}")
                 break
 
-            resultados = Parallel(n_jobs=N_JOBS_INTERNOS)(
+            resultados = Parallel(n_jobs=N_JOBS_INTERNOS, prefer="threads")(
                 delayed(evaluar_fusion)(i, j, particiones) for i, j in pares_a_evaluar
             )
 
