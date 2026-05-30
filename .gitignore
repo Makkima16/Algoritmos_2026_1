@@ -61,10 +61,14 @@ build/
 
 
 /GeoMIP/results
-
 /GeoMIP/data/samples_no_binary
 /GeoMIP/data/samples_binary
 /GeoMIP/viewer/public/results
+/GeoMIP/data/Pruebas
+
+# QNodes
+/QNodes/src/.samples
+/QNodes/.docs
 
 # Logs
 logs

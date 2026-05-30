@@ -19,6 +19,9 @@ from src.constants.error import (
 )
 
 
+_CANDIDATO_CACHE: dict = {}
+
+
 class SIA(ABC):
     """
     La clase SIA es la encargada de albergar como madre todos los diferentes algoritmos desarrollados, planteando la base de la que con el método `preparar_subsistema` se obtendrá uno con características indicadas por el usuario.
@@ -93,16 +96,17 @@ class SIA(ABC):
         )
 
         # Formación de datos con logs opcionales de ejemplificación
-        completo = System(tpm, estado_inicial)
-        self.sia_logger.critic("Original creado.")
-        # self.sia_logger.info(completo)
-        self.sia_logger.critic("Original:")
-        # self.sia_logger.info(completo)
-
-        candidato = completo.condicionar(dims_condicionadas)
-        self.sia_logger.critic("Candidato creado.")
-        # self.sia_logger.info(f"{dims_condicionadas}")
-        # self.sia_logger.debug(candidato)
+        cache_key = (id(tpm), tuple(estado_inicial.tolist()), condicion)
+        if cache_key in _CANDIDATO_CACHE:
+            candidato = _CANDIDATO_CACHE[cache_key]
+            self.sia_logger.critic("Candidato cargado desde caché.")
+        else:
+            completo = System(tpm, estado_inicial)
+            self.sia_logger.critic("Original creado.")
+            self.sia_logger.critic("Original:")
+            candidato = completo.condicionar(dims_condicionadas)
+            self.sia_logger.critic("Candidato creado.")
+            _CANDIDATO_CACHE[cache_key] = candidato
 
         subsistema = candidato.substraer(dims_alcance, dims_mecanismo)
         self.sia_logger.critic("Subsistema creado.")

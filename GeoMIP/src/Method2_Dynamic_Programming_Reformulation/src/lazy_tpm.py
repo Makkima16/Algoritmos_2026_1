@@ -131,7 +131,7 @@ class LazyTPM:
             self.ruta,
             header=None,
             chunksize=self.chunk_size,
-            skiprows=range(1, skip + 1) if skip > 0 else None,
+            skiprows=range(0, skip + 1) if skip > 0 else None,
             dtype=np.float32,      # float32 en vez de float64: mitad de RAM
         ):
             yield chunk_idx, df.to_numpy()
@@ -201,7 +201,7 @@ class LazyTPM:
         df = pd.read_csv(
             self.ruta,
             header=None,
-            skiprows=range(1, skip + 1) if skip > 0 else None,
+            skiprows=skip,
             nrows=self.chunk_size,
             dtype=np.float32,
         )

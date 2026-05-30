@@ -53,11 +53,8 @@ class Manager:
     def preparar_directorio_salida(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def cargar_red(self, ruta_archivo_csv: str = None) -> np.ndarray:
-        if ruta_archivo_csv:
-            dataset = np.genfromtxt(ruta_archivo_csv, delimiter=COLON_DELIM)
-        else:
-            dataset = np.genfromtxt(self.tpm_filename, delimiter=COLON_DELIM)
+    def cargar_red(self) -> np.ndarray:
+        dataset = np.genfromtxt(self.tpm_filename, delimiter=COLON_DELIM)
         return dataset
 
     def generar_red(self, dimensiones: int, datos_deterministas: bool = True) -> str:
