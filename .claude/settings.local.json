@@ -4,7 +4,14 @@
       "Bash(Get-ChildItem -Force)",
       "Bash(.venv/Scripts/python.exe -c ' *)",
       "Bash(.venv/Scripts/python.exe -m py_compile \"GeoMIP/src/Method2_Dynamic_Programming_Reformulation/exec_kgeomip.py\")",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(Find \"C:\\\\universidad\\\\Analisis y Diseño de Algoritmos\\\\AYDA_2026_1\" -type f -name \"*.py\" -not -path \".\\\\.venv\\\\*\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\universidad\\\\Analisis y Diseño de Algoritmos\\\\AYDA_2026_1\\\\GeoMIP\" -Recurse -Filter \"*.py\")",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Find \"C:\\\\universidad\\\\Analisis y Diseño de Algoritmos\\\\AYDA_2026_1\" -type f -name \"*.md\")",
+      "Bash(.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('GeoMIP/src/Method2_Dynamic_Programming_Reformulation/src/controllers/strategies/kgeomip.py'\\).read\\(\\)\\); print\\('OK: sintaxis válida'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('GeoMIP/src/Method2_Dynamic_Programming_Reformulation/src/controllers/strategies/kgeomip.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK: sintaxis valida'\\)\")",
+      "Bash(.venv\\\\Scripts\\\\python.exe -c \"import ast; ast.parse\\(open\\('QNodes/exec.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Sintaxis OK'\\)\")"
     ]
   }
 }

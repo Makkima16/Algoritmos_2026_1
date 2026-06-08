@@ -8,12 +8,13 @@ Cada k usa cpu_count-1 núcleos para la búsqueda interna con joblib.
 Esto evita dividir recursos entre k's y maximiza el rendimiento por tarea.
 
 NOTA sobre joblib:
-  - Los métodos internos (_busqueda_exhaustiva, _agrupamiento_jerarquico,
+  - Los métodos internos (_agrupamiento_jerarquico,
     _refinar_particion_local) usan joblib con n_jobs = N_JOBS_INTERNOS.
 """
 
 import time
 import itertools
+import random as _random_module
 from math import comb
 from typing import List, Tuple, Dict, Optional
 import multiprocessing
@@ -49,72 +50,12 @@ KGEOMIP_LABEL: str = "KGeoMIP"
 KGEOMIP_STRATEGY_TAG: str = f"{KGEOMIP_LABEL}_strategy"
 KGEOMIP_ANALYSIS_TAG: str = f"{KGEOMIP_LABEL}_analysis"
 
-# Número máximo de particiones S(n,k) antes de caer al greedy jerárquico.
-# Mantenido en 20 para forzar el Aislamiento Heurístico desde tamaños moderados.
-UMBRAL_STIRLING: int = 3_000
-
 # Mantener la posibilidad de que una parte tenga mecanismo vacío (∅).
-PERMITIR_PRESENTE_VACIO_POR_DEFECTO: bool = True
+PERMITIR_PRESENTE_VACIO_POR_DEFECTO: bool = False
 
 N_JOBS_INTERNOS: int = max(1, multiprocessing.cpu_count() - 1)
 
 
-# ── Utilidades matemáticas ─────────────────────────────────────────────────
-
-def stirling2(n: int, k: int) -> int:
-    """
-    Número de Stirling del segundo tipo S(n,k): cantidad de formas de
-    particionar un conjunto de n elementos en k subconjuntos no vacíos.
-
-    Fórmula: S(n,k) = (1/k!) · Σᵢ₌₀ᵏ (-1)^(k-i) · C(k,i) · iⁿ
-    """
-    if n == k:
-        return 1
-    if k == 1:
-        return 1
-    if k == 0 or k > n:
-        return 0
-    return k * stirling2(n - 1, k) + stirling2(n - 1, k - 1)
-
-
-def generar_k_particiones(elementos: List[int], k: int):
-    """
-    Genera todas las k-particiones del conjunto `elementos` usando los
-    números de Stirling del segundo tipo como base combinatoria.
-
-    Implementación mediante distribución restringida de elementos en k
-    cubetas distinguibles (criterio canónico: el primer elemento siempre
-    va a la parte 0).
-
-    Args:
-        elementos: Lista de índices a particionar.
-        k        : Número de partes (cada parte debe ser no vacía).
-
-    Yields:
-        Tupla de k listas de índices.
-        Ejemplo para elementos=[0,1,2], k=2:
-            ([0,1], [2]), ([0,2], [1]), ([0], [1,2])
-    """
-    n = len(elementos)
-    if k > n or k < 1:
-        return
-
-    def _distribuir(idx, partes, max_parte_actual):
-            if idx == n:
-                if all(len(p) > 0 for p in partes):
-                    yield tuple(list(p) for p in partes)
-                return
-            elem = elementos[idx]
-            limite = min(max_parte_actual + 1, k - 1)
-            for parte_idx in range(limite + 1):
-                partes[parte_idx].append(elem)
-                nuevo_max = max(max_parte_actual, parte_idx)
-                yield from _distribuir(idx + 1, partes, nuevo_max)
-                partes[parte_idx].pop()
-
-    partes_vacias: List[List[int]] = [[] for _ in range(k)]
-    partes_vacias[0].append(elementos[0])
-    yield from _distribuir(1, partes_vacias, 0)
 
 
 def _generar_candidatos_aislamiento(
@@ -429,23 +370,22 @@ def _construir_matriz_afinidad_desde_tabla(
 def _particion_grafo_hipercubo(
     matriz_afinidad: np.ndarray,
     k: int,
-    n_candidatos: int = 3,
+    n_candidatos: int = 6,
 ) -> "List[Tuple[List[int], ...]]":
     """
-    Genera candidatos de k-partición en milisegundos usando Spectral Clustering
-    sobre la matriz de afinidad NxN del hipercubo.
+    Genera candidatos de k-partición usando Spectral Clustering y
+    AgglomerativeClustering con múltiples configuraciones sobre la
+    matriz de afinidad NxN del hipercubo.
 
-    La matriz es tiny (tipicamente 3-15 nodos), así que el clustering completo
-    toma fracciones de milisegundo.  Se generan hasta n_candidatos particiones
-    variando la semilla, para luego evaluar EMD sólo en esos pocos candidatos.
-
-    Fallback a AgglomerativeClustering con métrica precomputada si SpectralClustering
-    falla (p.ej. matriz mal condicionada) o sklearn no está disponible.
+    Se prueban varias semillas y etiquetados en SpectralClustering, y
+    múltiples estrategias de linkage en AgglomerativeClustering para
+    cubrir regiones distintas del espacio de particiones. Cada candidato
+    se evalúa por EMD y solo se conserva el mejor tras el refinamiento.
 
     Args:
         matriz_afinidad: Matriz (N, N) en [0,1]; 1 = máxima similitud.
         k              : Número de clústeres deseados.
-        n_candidatos   : Máximo de particiones candidatas a devolver.
+        n_candidatos   : Máximo de particiones candidatas por método.
 
     Returns:
         Lista de tuplas de k listas de índices (nunca vacía: siempre hay fallback).
@@ -458,42 +398,52 @@ def _particion_grafo_hipercubo(
     candidatos: list = []
     A = np.clip(matriz_afinidad, 0.0, 1.0)
 
+    def _agregar(particion):
+        if all(len(p) > 0 for p in particion) and particion not in candidatos:
+            candidatos.append(particion)
+
     if _SKLEARN_DISPONIBLE:
-        for semilla in [42, 0, 7][:n_candidatos]:
+        semillas = [42, 0, 7, 13, 99, 2024][:n_candidatos]
+
+        # SpectralClustering con kmeans
+        for semilla in semillas:
             try:
                 etiquetas = SpectralClustering(
                     n_clusters=k,
                     affinity="precomputed",
                     random_state=semilla,
                     assign_labels="kmeans",
-                    n_init=20,
+                    n_init=30,
                 ).fit_predict(A)
-
-                particion = tuple(
-                    [i for i in range(n) if etiquetas[i] == c]
-                    for c in range(k)
-                )
-                if all(len(p) > 0 for p in particion) and particion not in candidatos:
-                    candidatos.append(particion)
+                _agregar(tuple([i for i in range(n) if etiquetas[i] == c] for c in range(k)))
             except Exception:
                 pass
 
-        # Fallback con AgglomerativeClustering sobre distancias
-        if len(candidatos) < n_candidatos:
+        # SpectralClustering con discretize (variante independiente)
+        for semilla in semillas[:3]:
             try:
-                D = np.clip(1.0 - A, 0.0, None)
-                np.fill_diagonal(D, 0.0)
+                etiquetas = SpectralClustering(
+                    n_clusters=k,
+                    affinity="precomputed",
+                    random_state=semilla,
+                    assign_labels="discretize",
+                    n_init=30,
+                ).fit_predict(A)
+                _agregar(tuple([i for i in range(n) if etiquetas[i] == c] for c in range(k)))
+            except Exception:
+                pass
+
+        # AgglomerativeClustering con varias estrategias de linkage
+        D = np.clip(1.0 - A, 0.0, None)
+        np.fill_diagonal(D, 0.0)
+        for linkage in ("average", "complete", "single"):
+            try:
                 etiquetas = AgglomerativeClustering(
                     n_clusters=k,
                     metric="precomputed",
-                    linkage="average",
+                    linkage=linkage,
                 ).fit_predict(D)
-                particion = tuple(
-                    [i for i in range(n) if etiquetas[i] == c]
-                    for c in range(k)
-                )
-                if all(len(p) > 0 for p in particion) and particion not in candidatos:
-                    candidatos.append(particion)
+                _agregar(tuple([i for i in range(n) if etiquetas[i] == c] for c in range(k)))
             except Exception:
                 pass
 
@@ -511,7 +461,6 @@ def _particion_grafo_hipercubo(
         if all(len(p) > 0 for p in particion_fb):
             candidatos.append(particion_fb)
         else:
-            # Partición de emergencia: distribución round-robin
             grupos = [[] for _ in range(k)]
             for i in range(n):
                 grupos[i % k].append(i)
@@ -556,6 +505,47 @@ def fmt_k_particion(
     linea_bot = "".join(b for _, b in partes_fmt)
     return f"{linea_top}\n{linea_bot}"
 
+
+def _perturbacion_aleatoria(
+    particion: "Tuple[List[int], ...]",
+    n_movimientos: int = 2,
+    semilla: int = 42,
+) -> "Tuple[List[int], ...]":
+    """
+    Perturba una k-partición moviendo aleatoriamente nodos entre bloques.
+
+    Garantiza que ningún bloque quede vacío. Usado por la Búsqueda Local
+    Iterada (ILS) para escapar de mínimos locales del refinamiento 1-move.
+
+    Args:
+        particion    : Tupla de k listas de índices (puede incluir centinela -1).
+        n_movimientos: Número de nodos a reubicar en la perturbación.
+        semilla      : Semilla para reproducibilidad.
+    """
+    rng = _random_module.Random(semilla)
+    partes = [list(p) for p in particion]
+    k = len(partes)
+
+    for _ in range(n_movimientos):
+        candidatos_origen = [
+            i for i, p in enumerate(partes)
+            if sum(1 for x in p if x != -1) > 1
+        ]
+        if not candidatos_origen:
+            break
+        i_origen = rng.choice(candidatos_origen)
+        nodos_reales = [x for x in partes[i_origen] if x != -1]
+        nodo = rng.choice(nodos_reales)
+        candidatos_destino = [j for j in range(k) if j != i_origen]
+        if not candidatos_destino:
+            continue
+        i_destino = rng.choice(candidatos_destino)
+        partes[i_origen].remove(nodo)
+        partes[i_destino].append(nodo)
+
+    return tuple(partes)
+
+
 def _evaluar_k_completo(
     k: int,
     subsistema,
@@ -569,10 +559,15 @@ def _evaluar_k_completo(
     tiempo_maximo_segundos: Optional[float] = None,
 ) -> dict:
     """
-    Evalúa un valor específico de k y retorna su resultado.
+    Evalúa un valor específico de k usando heurísticas geométricas e ILS.
 
-    Esta función se ejecuta en un proceso separado. Recibe el subsistema
-    ya preparado y devuelve un dict con k, pérdida y partición encontrada.
+    Pipeline:
+      1. SpectralClustering + AgglomerativeClustering (múltiples semillas/linkage).
+      2. Candidatos de aislamiento: k-1 nodos aislados + clúster residual.
+      3. Variantes con mecanismo vacío (∅) si está habilitado.
+      4. Evaluación EMD en paralelo sobre todos los candidatos.
+      5. Refinamiento local 1-move sobre el mejor candidato.
+      6. Búsqueda Local Iterada (ILS): perturbación + re-refinamiento × N_ILS.
 
     Args:
         k               : Número de partes a evaluar.
@@ -587,139 +582,121 @@ def _evaluar_k_completo(
     Returns:
         dict con claves: k, perdida, particion, particion_grafica, error.
     """
+    N_ILS = 4  # reinicios de búsqueda local iterada
+
     try:
-        if stirling2(n_vars, k) <= UMBRAL_STIRLING:
-            # ── Búsqueda Exhaustiva con paralelismo joblib ───────────────────
-            elementos = list(range(n_vars))
-
-            def evaluar_en_proceso(particion):
-                perdida = evaluar_k_particion(
-                    subsistema, indices_ncubos, dims_ncubos,
-                    particion, dists_marginales,
-                )
-                return (perdida, particion)
-
-            iterador = generar_k_particiones(elementos, k)
-            resultados = Parallel(n_jobs=n_jobs_internos, prefer="threads")(
-                delayed(evaluar_en_proceso)(p) for p in iterador
+        # ── Fase 1: generación de candidatos ─────────────────────────────────
+        candidatos_geo: list = []
+        if matriz_afinidad is not None:
+            candidatos_geo = _particion_grafo_hipercubo(
+                matriz_afinidad, k, n_candidatos=6
             )
 
-            mejor_perdida = float("inf")
-            mejor_particion = None
-            for perdida, particion in resultados:
-                if perdida < mejor_perdida:
-                    mejor_perdida = perdida
-                    mejor_particion = particion
+        for c_ais in _generar_candidatos_aislamiento(n_vars, k):
+            if c_ais not in candidatos_geo:
+                candidatos_geo.append(c_ais)
 
-            if permitir_presente_vacio:
-                mejor_perdida, mejor_particion = _refinar_particion_local(
+        if permitir_presente_vacio:
+            for c_vac in _generar_candidatos_presente_vacio(n_vars, k):
+                if c_vac not in candidatos_geo:
+                    candidatos_geo.append(c_vac)
+
+        if not candidatos_geo:
+            # Fallback jerárquico bottom-up cuando no hay candidatos
+            particiones: List[List[int]] = [[i] for i in range(n_vars)]
+
+            def evaluar_fusion(i, j, particiones_actuales):
+                nueva_parte = particiones_actuales[i] + particiones_actuales[j]
+                particion_prueba = tuple(
+                    [particiones_actuales[p] for p in range(len(particiones_actuales))
+                     if p != i and p != j]
+                    + [nueva_parte]
+                )
+                perdida = evaluar_k_particion(
+                    subsistema, indices_ncubos, dims_ncubos,
+                    particion_prueba, dists_marginales,
+                )
+                return (perdida, i, j, nueva_parte)
+
+            while len(particiones) > k:
+                n_partes = len(particiones)
+                pares = [(i, j) for i in range(n_partes)
+                         for j in range(i + 1, n_partes)]
+                if not pares:
+                    break
+                resultados_fb = Parallel(n_jobs=n_jobs_internos, prefer="threads")(
+                    delayed(evaluar_fusion)(i, j, particiones) for i, j in pares
+                )
+                _, i_idx, j_idx, mejor_union = min(resultados_fb, key=lambda x: x[0])
+                nueva_lista = [
+                    particiones[p] for p in range(len(particiones))
+                    if p != i_idx and p != j_idx
+                ]
+                nueva_lista.append(mejor_union)
+                particiones = nueva_lista
+
+            mejor_particion = tuple(particiones)
+            mejor_perdida = evaluar_k_particion(
+                subsistema, indices_ncubos, dims_ncubos,
+                mejor_particion, dists_marginales,
+            )
+
+        else:
+            # ── Fase 2: evaluación EMD en paralelo ───────────────────────────
+            perdidas_candidatos = Parallel(
+                n_jobs=min(len(candidatos_geo), n_jobs_internos),
+                prefer="threads",
+            )(
+                delayed(evaluar_k_particion)(
+                    subsistema, indices_ncubos, dims_ncubos,
+                    candidato, dists_marginales,
+                )
+                for candidato in candidatos_geo
+            )
+            mejor_idx = int(np.argmin(perdidas_candidatos))
+            mejor_perdida = float(perdidas_candidatos[mejor_idx])
+            mejor_particion = candidatos_geo[mejor_idx]
+
+            # ── Fase 3: refinamiento local 1-move ────────────────────────────
+            tiempo_refinar = (
+                None if tiempo_maximo_segundos is None
+                else max(0.0, tiempo_maximo_segundos * 0.20)
+            )
+            mejor_perdida, mejor_particion = _refinar_particion_local(
+                subsistema,
+                indices_ncubos,
+                dims_ncubos,
+                mejor_particion,
+                dists_marginales,
+                permitir_presente_vacio=permitir_presente_vacio,
+                tiempo_maximo_segundos=tiempo_refinar,
+            )
+
+            # ── Fase 4: Búsqueda Local Iterada (ILS) ─────────────────────────
+            # Perturba el óptimo local y vuelve a refinar; conserva el mejor.
+            n_perturb = max(1, n_vars // 3)
+            tiempo_ils_por_iter = (
+                None if tiempo_maximo_segundos is None
+                else max(0.0, tiempo_maximo_segundos * 0.15)
+            )
+            for iteracion_ils in range(N_ILS):
+                particion_perturbada = _perturbacion_aleatoria(
+                    mejor_particion,
+                    n_movimientos=n_perturb,
+                    semilla=42 + iteracion_ils * 17,
+                )
+                perdida_ils, particion_ils = _refinar_particion_local(
                     subsistema,
                     indices_ncubos,
                     dims_ncubos,
-                    mejor_particion,
+                    particion_perturbada,
                     dists_marginales,
-                    permitir_presente_vacio=True,
-                    tiempo_maximo_segundos=tiempo_maximo_segundos,
+                    permitir_presente_vacio=permitir_presente_vacio,
+                    tiempo_maximo_segundos=tiempo_ils_por_iter,
                 )
-
-        else:
-            # ── Clustering de Grafo de Hipercubo + Aislamiento Heurístico ───
-            #
-            # 1. Candidatos geométricos desde SpectralClustering sobre la
-            #    matriz de afinidad NxN (O(N³) sobre matriz tiny → milisegundos).
-            # 2. Candidatos de aislamiento: k-1 nodos aislados + clúster residual.
-            #    Para K=2 son N candidatos; para K=3, C(N,2); para K>3, C(N,k-1).
-            #    En el 99% de los casos para K=2, uno de estos es el corte MIP exacto.
-            # 3. EMD evaluada en paralelo sobre todos los candidatos combinados.
-
-            candidatos_geo: list = []
-            if matriz_afinidad is not None:
-                candidatos_geo = _particion_grafo_hipercubo(
-                    matriz_afinidad, k, n_candidatos=3
-                )
-
-            # Agregar candidatos de aislamiento heurístico (sin duplicados)
-            for c_ais in _generar_candidatos_aislamiento(n_vars, k):
-                if c_ais not in candidatos_geo:
-                    candidatos_geo.append(c_ais)
-
-            # Agregar variantes con mecanismo vacío (∅) para los nodos aislados.
-            # Captura el caso donde el futuro es causalmente independiente del presente.
-            if permitir_presente_vacio:
-                for c_vac in _generar_candidatos_presente_vacio(n_vars, k):
-                    if c_vac not in candidatos_geo:
-                        candidatos_geo.append(c_vac)
-
-            if candidatos_geo:
-                perdidas_candidatos = Parallel(
-                    n_jobs=min(len(candidatos_geo), n_jobs_internos),
-                    prefer="threads",
-                )(
-                    delayed(evaluar_k_particion)(
-                        subsistema, indices_ncubos, dims_ncubos,
-                        candidato, dists_marginales,
-                    )
-                    for candidato in candidatos_geo
-                )
-                mejor_idx = int(np.argmin(perdidas_candidatos))
-                mejor_perdida = float(perdidas_candidatos[mejor_idx])
-                mejor_particion = candidatos_geo[mejor_idx]
-
-                if tiempo_maximo_segundos is None or tiempo_maximo_segundos > 0:
-                    refinar_con_segundos = tiempo_maximo_segundos
-                    if refinar_con_segundos is not None:
-                        refinar_con_segundos = max(0.0, refinar_con_segundos * 0.25)
-                    mejor_perdida, mejor_particion = _refinar_particion_local(
-                        subsistema,
-                        indices_ncubos,
-                        dims_ncubos,
-                        mejor_particion,
-                        dists_marginales,
-                        permitir_presente_vacio=permitir_presente_vacio,
-                        tiempo_maximo_segundos=refinar_con_segundos,
-                    )
-
-            else:
-                # Fallback: jerárquico bottom-up (solo si el grafo falla)
-                particiones: List[List[int]] = [[i] for i in range(n_vars)]
-
-                def evaluar_fusion(i, j, particiones_actuales):
-                    nueva_parte = particiones_actuales[i] + particiones_actuales[j]
-                    particion_prueba = tuple(
-                        [particiones_actuales[p] for p in range(len(particiones_actuales))
-                         if p != i and p != j]
-                        + [nueva_parte]
-                    )
-                    perdida = evaluar_k_particion(
-                        subsistema, indices_ncubos, dims_ncubos,
-                        particion_prueba, dists_marginales,
-                    )
-                    return (perdida, i, j, nueva_parte)
-
-                while len(particiones) > k:
-                    n_partes = len(particiones)
-                    pares = [(i, j) for i in range(n_partes)
-                             for j in range(i + 1, n_partes)]
-                    if not pares:
-                        break
-                    resultados = Parallel(n_jobs=n_jobs_internos, prefer="threads")(
-                        delayed(evaluar_fusion)(i, j, particiones) for i, j in pares
-                    )
-                    mejor_perdida_fusion, i_idx, j_idx, mejor_union = min(
-                        resultados, key=lambda x: x[0]
-                    )
-                    nueva_lista = [
-                        particiones[p] for p in range(len(particiones))
-                        if p != i_idx and p != j_idx
-                    ]
-                    nueva_lista.append(mejor_union)
-                    particiones = nueva_lista
-
-                mejor_particion = tuple(particiones)
-                mejor_perdida = evaluar_k_particion(
-                    subsistema, indices_ncubos, dims_ncubos,
-                    mejor_particion, dists_marginales,
-                )
+                if perdida_ils + 1e-12 < mejor_perdida:
+                    mejor_perdida = perdida_ils
+                    mejor_particion = particion_ils
 
         fmt_pk = fmt_k_particion(mejor_particion, indices_ncubos, dims_ncubos)
         return {
@@ -746,11 +723,10 @@ class KGeoMIP(SIA):
     """
     Extensión de GeoMIP para k-particiones (k ≥ 2).
 
-    Para k=2 reproduce exactamente los resultados de GeometricSIA
-    (caso base de validación).
-
-    Para k>2 usa búsqueda exhaustiva cuando el sistema es pequeño, o un
-    Clustering de Hipercubo + Aislamiento Heurístico cuando es grande.
+    Para cualquier k ≥ 2 usa un pipeline heurístico completo:
+    SpectralClustering + AgglomerativeClustering (múltiples semillas y
+    linkage) + candidatos de aislamiento + refinamiento 1-move +
+    Búsqueda Local Iterada (ILS) con perturbaciones aleatorias.
 
     Args:
         gestor (Manager): Gestor con el estado inicial y ruta de la TPM.
@@ -971,13 +947,17 @@ class KGeoMIP(SIA):
             f"ÓPTIMA k-MIP (k={k_optimo}) pérdida={mejor_perdida:.6f}:\n{fmt}"
         )
 
+        tiempo_busqueda = time.time() - self.sia_tiempo_inicio
+        tiempo_prep = getattr(self, "sia_tiempo_preparacion", 0.0)
+
         return Solution(
             estrategia=f"{KGEOMIP_LABEL}(Global Optimal K={k_optimo})",
             perdida=mejor_perdida,
             distribucion_subsistema=self.sia_dists_marginales,
             distribucion_particion=dist_reconstruida,
             particion=fmt,
-            tiempo_total=time.time() - self.sia_tiempo_inicio,
+            tiempo_total=tiempo_busqueda + tiempo_prep,
+            tiempo_preparacion=tiempo_prep,
         )
     # ── Construcción de tabla de costos ─────────
 
@@ -1119,61 +1099,7 @@ class KGeoMIP(SIA):
             f"(sklearn={'disponible' if _SKLEARN_DISPONIBLE else 'no disponible'})."
         )
 
-    # ── Estrategia 1: búsqueda exhaustiva ─────────────────────────────────
-
-    def _busqueda_exhaustiva(
-        self, k: int
-    ) -> Tuple[List[int], ...]:
-        """
-        Evalúa todas las k-particiones posibles y retorna la de menor pérdida.
-
-        Complejidad: O(S(n,k) · k · n) donde S(n,k) es el número de Stirling.
-
-        Args:
-            k: Número de partes.
-
-        Returns:
-            Tupla de k listas con los índices de variables de cada parte.
-        """
-        n_vars = len(self.sia_subsistema.indices_ncubos)
-        elementos = list(range(n_vars))
-
-        total_stirling = stirling2(n_vars, k)
-        self.logger.critic(
-            f"Exhaustiva: S({n_vars},{k}) = {total_stirling} particiones. Resolviendo en paralelo..."
-        )
-
-        def evaluar_en_proceso(particion):
-            perdida = evaluar_k_particion(
-                self.sia_subsistema,
-                self.sia_subsistema.indices_ncubos,
-                self.sia_subsistema.dims_ncubos,
-                particion,
-                self.sia_dists_marginales,
-            )
-            return (perdida, particion)
-
-        iterador_particiones = generar_k_particiones(elementos, k)
-        resultados = Parallel(n_jobs=N_JOBS_INTERNOS, prefer="threads")(
-            delayed(evaluar_en_proceso)(p) for p in iterador_particiones
-        )
-
-        mejor_perdida = float("inf")
-        mejor_particion = None
-
-        for perdida, particion in resultados:
-            self.memoria_particiones[tuple(tuple(p) for p in particion)] = (
-                perdida,
-                None,
-            )
-            if perdida < mejor_perdida:
-                mejor_perdida = perdida
-                mejor_particion = particion
-
-        self.logger.critic(f"Exhaustiva terminada. Mejor pérdida = {mejor_perdida:.6f}.")
-        return mejor_particion
-
-    # ── Estrategia 2: heurística jerárquica bottom-up ─────────────────────────
+    # ── Estrategia: heurística jerárquica bottom-up (fallback de clase) ──────
 
     def _agrupamiento_jerarquico(
         self, k: int

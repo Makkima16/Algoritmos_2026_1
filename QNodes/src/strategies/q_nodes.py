@@ -1,101 +1,78 @@
-import time
-from typing import Union
-import numpy as np
-from src.middlewares.slogger import SafeLogger
-from src.funcs.iit import emd_efecto, ABECEDARY
-from src.middlewares.profile import gestor_perfilado, profile
-from src.funcs.format import fmt_biparticion_q
-from src.models.base.sia import SIA
+"""
+DynamicPartition — k-MIP exhaustivo mediante Programación Dinámica + Branch & Bound.
 
+Tres optimizaciones sobre el problema de k-partición óptima (k=2..N):
+
+1. Poda Branch & Bound: mantiene `_mejor_phi` como cota superior dinámica.
+   Abandona cualquier rama cuyo costo acumulado >= _mejor_phi sin completarla.
+
+2. Memoización Perezosa (Top-Down): `_dist_parte(mascara)` y `_costo_parte(mascara)`
+   solo se calculan cuando una rama activa los instancia, nunca de forma anticipada.
+   Esto evita la inundación de RAM propia del bottom-up cuando N es alto.
+
+3. Operaciones Bitwise estrictas: subconjuntos representados como máscaras enteras.
+   Unión, intersección e iteración se realizan con operadores bit a bit en lugar de
+   búsquedas en arrays, tuplas o strings, reduciendo lookups costosos a ciclos de CPU.
+
+Adicionalmente, la búsqueda usa ordenación canónica (la próxima parte siempre contiene
+el nodo de índice mínimo restante) para eliminar permutaciones equivalentes de la misma
+partición y así explorar cada partición única exactamente una vez.
+"""
+import time
+from typing import Generator, Optional
+
+import numpy as np
+
+from src.middlewares.slogger import SafeLogger
+from src.middlewares.profile import gestor_perfilado, profile
+from src.funcs.format import fmt_k_particion_dp
+from src.models.base.sia import SIA
 from src.models.core.solution import Solution
 from src.constants.models import (
     QNODES_ANALYSIS_TAG,
     QNODES_LABEL,
     QNODES_STRAREGY_TAG,
 )
-from src.constants.base import (
-    COLS_IDX,
-    INT_ZERO,
-    TYPE_TAG,
-    NET_LABEL,
-    INFTY_POS,
-    LAST_IDX,
-    EFFECT,
-    ACTUAL,
-)
+from src.constants.base import COLS_IDX, NET_LABEL, TYPE_TAG
 from src.models.base.application import aplicacion
 
 
-class QNodes(SIA):
+# Mantener la posibilidad de que una parte tenga mecanismo vacío (∅).
+PERMITIR_PRESENTE_VACIO_POR_DEFECTO: bool = False
+
+
+def _indices_activos(mascara: int) -> Generator[int, None, None]:
+    """Genera los índices de bits activos de `mascara` en orden ascendente."""
+    m = mascara
+    while m:
+        bit = m & (-m)               # bit menos significativo activo
+        yield bit.bit_length() - 1   # posición local del bit
+        m ^= bit                     # apagar ese bit y seguir
+
+
+class DynamicPartition(SIA):
     """
-    Clase QNodes para el análisis de redes mediante el algoritmo Q.
+    Estrategia de Partición Dinámica con Memoización para k-MIP exhaustivo.
 
-    Esta clase implementa un gestor principal para el análisis de redes que utiliza
-    el algoritmo Q para encontrar la partición óptima que minimiza la
-    pérdida de información en el sistema. Hereda de la clase base SIA (Sistema de
-    Información Activo) y proporciona funcionalidades para analizar la estructura
-    y dinámica de la red.
+    Encuentra la k-partición óptima (k ∈ [2, N]) que minimiza la pérdida
+    de información integrada (Phi) mediante Programación Dinámica con:
 
-    Args:
-    ----
-        config (Loader):
-            Instancia de la clase Loader que contiene la configuración del sistema
-            y los parámetros necesarios para el análisis.
+    - Memoización Top-Down perezosa: calcula dist_parte[mascara] solo cuando
+      esa sub-parte es instanciada por una rama activa del árbol de búsqueda.
+    - Branch & Bound: abandona ramas cuyo costo acumulado >= mejor_phi conocido.
+    - Representación bitwise: subconjuntos como enteros para operaciones O(1).
+    - Ordenación canónica: garantiza que cada partición única se explore una sola vez.
 
-    Attributes:
-    ----------
-        m (int):
-            Número de elementos en el conjunto de purview (vista).
+    A diferencia de la implementación anterior (Stoer-Wagner, k=2 únicamente),
+    esta estrategia garantiza el óptimo global evaluando todos los valores de k.
 
-        n (int):
-            Número de elementos en el conjunto de mecanismos.
-
-        tiempos (tuple[np.ndarray, np.ndarray]):
-            Tupla de dos arrays que representan los tiempos para los estados
-            actual y efecto del sistema.
-
-        etiquetas (list[tuple]):
-            Lista de tuplas conteniendo las etiquetas para los nodos,
-            con versiones en minúsculas y mayúsculas del abecedario.
-
-        vertices (set[tuple]):
-            Conjunto de vértices que representan los nodos de la red,
-            donde cada vértice es una tupla (tiempo, índice).
-
-        memoria (dict):
-            Diccionario para almacenar resultados intermedios y finales
-            del análisis (memoización).
-
-        logger:
-            Instancia del logger configurada para el análisis Q.
-
-    Methods:
-    -------
-        run(condicion, purview, mechanism):
-            Ejecuta el análisis principal de la red con las condiciones,
-            purview y mecanismo especificados.
-
-        algorithm(vertices):
-            Implementa el algoritmo Q para encontrar la partición
-            óptima del sistema.
-
-        funcion_submodular(deltas, omegas):
-            Calcula la función submodular para evaluar particiones candidatas.
-
-        view_solution(mip):
-            Visualiza la solución encontrada en términos de las particiones
-            y sus valores asociados.
-
-        nodes_complement(nodes):
-            Obtiene el complemento de un conjunto de nodos respecto a todos
-            los vértices del sistema.
-
-    Notes:
-    -----
-    - La clase implementa una versión secuencial del algoritmo Q para encontrar la partición que minimiza la pérdida de información.
-    - Utiliza memoización para evitar recálculos innecesarios durante el proceso.
-    - El análisis se realiza considerando dos tiempos: actual (presente) y
-      efecto (futuro).
+    Attrs:
+        _cache_dist      : mascara (int) → distribución marginal normal.
+        _cache_dist_vacio: mascara (int) → distribución marginal con presentes=∅.
+        _cache_costo     : mascara (int) → contribución Phi de esa parte.
+        _usar_vacio      : mascara (int) → True si la variante vacía dio menor costo.
+        _mejor_phi       : menor Phi encontrado hasta el momento (cota superior B&B).
+        _mejor_particion : lista de máscaras que define la partición óptima actual.
     """
 
     def __init__(self, tpm: np.ndarray):
@@ -103,281 +80,284 @@ class QNodes(SIA):
         gestor_perfilado.start_session(
             f"{NET_LABEL}{len(tpm[COLS_IDX])}{aplicacion.pagina_red_muestra}"
         )
-        self.m: int
-        self.n: int
-        self.tiempos: tuple[np.ndarray, np.ndarray]
-        self.etiquetas = [tuple(s.lower() for s in ABECEDARY), ABECEDARY]
-        self.vertices: set[tuple]
-        self.clave_submodular = [], []
-        self.memoria_delta = {}
-        self.memoria_grupo_candidato = {}
-
-        self.indices_alcance: np.ndarray
-        self.indices_mecanismo: np.ndarray
-
+        self._cache_dist: dict[int, np.ndarray] = {}
+        self._cache_costo: dict[int, float] = {}
+        self._mejor_phi: float = float("inf")
+        self._mejor_particion: list[int] = []
+        self._N: int = 0
         self.logger = SafeLogger(QNODES_STRAREGY_TAG)
+        # Soporte para mecanismo vacío (∅)
+        self._permitir_presente_vacio: bool = False
+        self._cache_dist_vacio: dict[int, np.ndarray] = {}
+        self._usar_vacio: dict[int, bool] = {}
 
+    @profile(context={TYPE_TAG: QNODES_ANALYSIS_TAG})
     def aplicar_estrategia(
         self,
         estado_inicial: str,
         condicion: str,
         alcance: str,
         mecanismo: str,
-    ):
+        k: Optional[int] = None,
+        permitir_presente_vacio: bool = PERMITIR_PRESENTE_VACIO_POR_DEFECTO,
+    ) -> Solution:
+        self._permitir_presente_vacio = permitir_presente_vacio
         self.sia_preparar_subsistema(estado_inicial, condicion, alcance, mecanismo)
 
-        # e.g. (1,0)=A (1,1)=B (1,2)=C #
-        futuro = tuple(
-            (EFFECT, idx_efecto) for idx_efecto in self.sia_subsistema.indices_ncubos
+        self._N = len(self.sia_subsistema.indices_ncubos)
+        mascara_total = (1 << self._N) - 1
+
+        # Reiniciar estado entre ejecuciones
+        self._cache_dist.clear()
+        self._cache_costo.clear()
+        self._cache_dist_vacio.clear()
+        self._usar_vacio.clear()
+        self._mejor_phi = float("inf")
+        self._mejor_particion = []
+
+        if self._N < 2:
+            # Sistema trivial: no existe partición válida k>=2
+            dist_trivial = self.sia_dists_marginales.copy()
+            return Solution(
+                estrategia=QNODES_LABEL,
+                perdida=0.0,
+                distribucion_subsistema=self.sia_dists_marginales,
+                distribucion_particion=dist_trivial,
+                tiempo_total=time.time() - self.sia_tiempo_inicio,
+                particion="Sistema trivial (N<2)\n",
+            )
+
+        # Validar k si fue especificado por el usuario
+        if k is not None and (k < 2 or k > self._N):
+            raise ValueError(
+                f"k={k} fuera del rango permitido [2, {self._N}]"
+            )
+
+        # Warm-start: cota superior inicial para acelerar la poda B&B
+        if k is None or k == 2:
+            # N biparticiones de singleton {nodo_i | resto}
+            for i in range(self._N):
+                bit_i = 1 << i
+                bit_resto = mascara_total ^ bit_i
+                costo_warmup = self._costo_parte(bit_i) + self._costo_parte(bit_resto)
+                if costo_warmup < self._mejor_phi:
+                    self._mejor_phi = costo_warmup
+                    self._mejor_particion = [bit_i, bit_resto]
+        else:
+            # Warm-start para k > 2: distribución round-robin
+            grupos_rr = [0] * k
+            for i in range(self._N):
+                grupos_rr[i % k] |= (1 << i)
+            if all(g > 0 for g in grupos_rr):
+                costo_ws = sum(self._costo_parte(g) for g in grupos_rr)
+                if costo_ws < self._mejor_phi:
+                    self._mejor_phi = costo_ws
+                    self._mejor_particion = list(grupos_rr)
+
+            # Variante k-1 singletons consecutivos + residual
+            for primer_nodo in range(self._N - k + 1):
+                partes_ws: list[int] = []
+                bits_usados = 0
+                for idx_s in range(primer_nodo, primer_nodo + k - 1):
+                    bit = 1 << idx_s
+                    partes_ws.append(bit)
+                    bits_usados |= bit
+                bit_residual = mascara_total ^ bits_usados
+                if bit_residual and len(partes_ws) == k - 1:
+                    partes_ws.append(bit_residual)
+                    costo_ws = sum(self._costo_parte(p) for p in partes_ws)
+                    if costo_ws < self._mejor_phi:
+                        self._mejor_phi = costo_ws
+                        self._mejor_particion = list(partes_ws)
+
+        # Búsqueda DP exhaustiva con Branch & Bound sobre todas las k-particiones
+        self._dp_buscar(mascara_total, 0.0, [], k)
+
+        # Reconstruir distribución de la partición óptima
+        dist_reconstruida = np.empty(self._N, dtype=np.float32)
+        for mascara in self._mejor_particion:
+            dist_parte = self._dist_parte_efectiva(mascara)
+            for i in _indices_activos(mascara):
+                dist_reconstruida[i] = float(dist_parte[i])
+
+        mascaras_vacio = {m for m in self._mejor_particion if self._usar_vacio.get(m, False)}
+        fmt_mip = fmt_k_particion_dp(
+            self._mejor_particion,
+            self.sia_subsistema.indices_ncubos,
+            self.sia_subsistema.dims_ncubos,
+            mascaras_vacio,
         )
-
-        # e.g. (0,0)=a (0,2)=c (0,4)=e #
-        presente = tuple(
-            (ACTUAL, idx_actual) for idx_actual in self.sia_subsistema.dims_ncubos
-        )
-
-        self.m = self.sia_subsistema.indices_ncubos.size
-        self.n = self.sia_subsistema.dims_ncubos.size
-
-        self.indices_alcance = self.sia_subsistema.indices_ncubos
-        self.indices_mecanismo = self.sia_subsistema.dims_ncubos
-
-        self.tiempos = (
-            np.zeros(self.n, dtype=np.int8),
-            np.zeros(self.m, dtype=np.int8),
-        )
-
-        vertices = list(presente + futuro)
-        self.vertices = set(presente + futuro)
-        mip = self.algorithm(vertices)
-
-        fmt_mip = fmt_biparticion_q(list(mip), self.nodes_complement(mip))
-        perdida_mip, dist_marginal_mip = self.memoria_grupo_candidato[mip]
 
         return Solution(
             estrategia=QNODES_LABEL,
-            perdida=perdida_mip,
+            perdida=self._mejor_phi,
             distribucion_subsistema=self.sia_dists_marginales,
-            distribucion_particion=dist_marginal_mip,
+            distribucion_particion=dist_reconstruida,
             tiempo_total=time.time() - self.sia_tiempo_inicio,
             particion=fmt_mip,
         )
 
-    @profile(context={TYPE_TAG: QNODES_ANALYSIS_TAG})
-    def algorithm(self, vertices: list[tuple[int, int]]):
+    # ── Memoización perezosa (Top-Down) ────────────────────────────────────
+
+    def _dist_parte(self, mascara: int) -> np.ndarray:
         """
-        Implementa el algoritmo Q para encontrar la partición óptima de un sistema que minimiza la pérdida de información, basándose en principios de submodularidad dentro de la teoría de lainformación.
+        Calcula y cachea la distribución marginal de la parte definida por `mascara`.
 
-        El algoritmo opera sobre un conjunto de vértices que representan nodos en diferentes tiempos del sistema (presente y futuro). La idea fundamental es construir incrementalmente grupos de nodos que, cuando se particionan, producen la menor pérdida posible de información en el sistema.
+        La parte identificada por `mascara` contiene todos los nodos cuyo bit local
+        esté activo en la máscara. Los nodos del sistema aparecen a la vez como
+        futuros (t+1) y presentes (t), donde:
 
-        Proceso Principal:
-        -----------------
-        El algoritmo comienza estableciendo dos conjuntos fundamentales: omega (W) y delta.
-        Omega siempre inicia con el primer vértice del sistema, mientras que delta contiene todos los vértices restantes. Esta decisión no es arbitraria - al comenzar con un
-        solo elemento en omega, podemos construir grupos de manera incremental evaluando cómo cada adición afecta la pérdida de información.
+          futuros(mascara)  = indices_ncubos[bits(mascara)]
+          presentes(mascara) = intersect(futuros, dims_ncubos)
 
-        La ejecución se desarrolla en fases, ciclos e iteraciones, donde cada fase representa un nivel diferente y conlleva a la formación de una partición candidata, cada ciclo representa un incremento de elementos al conjunto W y cada iteración determina al final cuál es el mejor elemento/cambio/delta para añadir en W.
-        Fase >> Ciclo >> Iteración.
-
-        1. Formación Incremental de Grupos:
-        El algoritmo mantiene un conjunto omega que crece gradualmente en cada j-iteración. En cada paso, evalúa todos los deltas restantes para encontrar cuál, al unirse con omega produce la menor pérdida de información. Este proceso utiliza la función submodular para calcular la diferencia entre la EMD (Earth Mover's Distance) de la combinación y la EMD individual del delta evaluado.
-
-        2. Evaluación de deltas:
-        Para cada delta candidato el algoritmo:
-        - Calcula su EMD individual si no está en memoria.
-        - Calcula la EMD de su combinación con el conjunto omega actual
-        - Determina la diferencia entre estas EMDs (el "costo" de la combinación)
-        El delta que produce el menor costo se selecciona y se añade a omega.
-
-        3. Formación de Nuevos Grupos:
-        Al final de cada fase cuando omega crezca lo suficiente, el algoritmo:
-        - Toma los últimos elementos de omega y delta (par candidato).
-        - Los combina en un nuevo grupo
-        - Actualiza la lista de vértices para la siguiente fase
-        Este proceso de agrupamiento permite que el algoritmo construya particiones
-        cada vez más complejas y reutilice estos "pares candidatos" para particiones en conjunto.
-
-        Optimización y Memoria:
-        ----------------------
-        El algoritmo utiliza dos estructuras de memoria clave:
-        - individual_memory: Almacena las EMDs y distribuciones de nodos individuales, evitando recálculos muy costosos.
-        - partition_memory: Guarda las EMDs y distribuciones de las particiones completas, permitiendo comparar diferentes combinaciones de grupos teniendo en cuenta que su valor real está asociado al valor individual de su formación delta.
-
-        La memoización es relevante puesto muchos cálculos de EMD son computacionalmente costosos y se repiten durante la ejecución del algoritmo.
-
-        Resultado:
-        ---------------
-        Al terminar todas las fases, el algoritmo selecciona la partición que produjo la menor EMD global, representando la división del sistema que mejor preserva su información causal.
-
-        Args:
-            vertices (list[tuple[int, int]]): Lista de vértices donde cada uno es una
-                tupla (tiempo, índice). tiempo=0 para presente (t_0), tiempo=1 para futuro (t_1).
-
-        Returns:
-            tuple[float, tuple[tuple[int, int], ...]]: El valor de pérdida en la primera posición, asociado con la partición óptima encontrada, identificada por la clave en partition_memory que produce la menor EMD.
+        Solo se computa cuando la máscara es instanciada por una rama activa
+        del árbol de PD — nunca se pre-calcula de forma anticipada.
         """
-        indice_emd = INT_ZERO
+        if mascara not in self._cache_dist:
+            idx_arr = np.fromiter(_indices_activos(mascara), dtype=np.int8)
+            futuros = self.sia_subsistema.indices_ncubos[idx_arr]
+            presentes = np.intersect1d(futuros, self.sia_subsistema.dims_ncubos)
+            dist = (
+                self.sia_subsistema
+                .bipartir(futuros, presentes)
+                .distribucion_marginal()
+            )
+            self._cache_dist[mascara] = dist
+        return self._cache_dist[mascara]
 
-        for i in range(len(vertices) - 1):
-            # self.logger.debug(f"total: {len(vertices) - i}")
-            omegas_ciclo = [vertices[0]]
-            deltas_ciclo = vertices[1:]
+    def _dist_parte_vacio(self, mascara: int) -> np.ndarray:
+        """Distribución marginal de la parte usando mecanismo vacío (∅)."""
+        if mascara not in self._cache_dist_vacio:
+            idx_arr = np.fromiter(_indices_activos(mascara), dtype=np.int8)
+            futuros = self.sia_subsistema.indices_ncubos[idx_arr]
+            dist = (
+                self.sia_subsistema
+                .bipartir(futuros, np.array([], dtype=np.int8))
+                .distribucion_marginal()
+            )
+            self._cache_dist_vacio[mascara] = dist
+        return self._cache_dist_vacio[mascara]
 
-            emd_particion_candidata = INFTY_POS
-            dist_particion_candidata = None
+    def _dist_parte_efectiva(self, mascara: int) -> np.ndarray:
+        """Retorna la distribución correcta según si esa parte usa variante vacía o no."""
+        if self._usar_vacio.get(mascara, False):
+            return self._dist_parte_vacio(mascara)
+        return self._dist_parte(mascara)
 
-            for j in range(len(deltas_ciclo) - 1):
-                # self.logger.critic(f"   {j=}")
-                emd_local = 1e5
-                indice_mip: int
+    def _costo_parte(self, mascara: int) -> float:
+        """
+        Contribución Phi de la parte `mascara` (aditiva sobre emd_efecto).
 
-                for k in range(len(deltas_ciclo)):
-                    emd_union, emd_delta, dist_marginal_delta = self.funcion_submodular(
-                        deltas_ciclo[k], omegas_ciclo
-                    )
+        Si `_permitir_presente_vacio` está activo, evalúa también la variante con
+        mecanismo vacío (∅) y usa la que produzca menor costo, registrando la elección
+        en `_usar_vacio[mascara]` para la reconstrucción posterior.
 
-                    emd_iteracion = emd_union - emd_delta
+        Descomposición exacta:
+          costo(parte) = sum_{i in parte} |dist_parte[i] - dist_original[i]|
 
-                    if emd_iteracion < emd_local:
-                        if emd_delta == INT_ZERO:
-                            clave = (
-                                tuple(deltas_ciclo[k])
-                                if isinstance(deltas_ciclo[k], list)
-                                else (deltas_ciclo[k],)
-                            )
-                            self.memoria_grupo_candidato[clave] = (
-                                emd_delta,
-                                dist_marginal_delta,
-                            )
-                            return clave
+        La suma de costos de todas las partes iguala emd_efecto(dist_reconstruida,
+        dist_original), lo que valida el Branch & Bound acumulativo: en cuanto la
+        suma parcial >= mejor_phi, ningún complemento puede mejorar el óptimo.
+        """
+        if mascara not in self._cache_costo:
+            dist = self._dist_parte(mascara)
+            idx_arr = np.fromiter(_indices_activos(mascara), dtype=np.int8)
+            costo_normal = float(
+                np.sum(np.abs(dist[idx_arr] - self.sia_dists_marginales[idx_arr]))
+            )
 
-                        emd_local = emd_iteracion
-                        indice_mip = k
-                        emd_particion_candidata = emd_delta
-                        dist_particion_candidata = dist_marginal_delta
-                # self.logger.critic(f"       [k]: {indice_mip}")
-
-                omegas_ciclo.append(deltas_ciclo[indice_mip])
-                deltas_ciclo.pop(indice_mip)
-            self.memoria_grupo_candidato[
-                tuple(
-                    deltas_ciclo[LAST_IDX]
-                    if isinstance(deltas_ciclo[LAST_IDX], list)
-                    else deltas_ciclo
+            if self._permitir_presente_vacio:
+                dist_v = self._dist_parte_vacio(mascara)
+                costo_vacio = float(
+                    np.sum(np.abs(dist_v[idx_arr] - self.sia_dists_marginales[idx_arr]))
                 )
-            ] = emd_particion_candidata, dist_particion_candidata
+                if costo_vacio < costo_normal:
+                    self._usar_vacio[mascara] = True
+                    self._cache_costo[mascara] = costo_vacio
+                else:
+                    self._usar_vacio[mascara] = False
+                    self._cache_costo[mascara] = costo_normal
+            else:
+                self._cache_costo[mascara] = costo_normal
+        return self._cache_costo[mascara]
 
-            par_candidato = (
-                [omegas_ciclo[LAST_IDX]]
-                if isinstance(omegas_ciclo[LAST_IDX], tuple)
-                else omegas_ciclo[LAST_IDX]
-            ) + (
-                deltas_ciclo[LAST_IDX]
-                if isinstance(deltas_ciclo[LAST_IDX], list)
-                else deltas_ciclo
-            )
+    # ── Búsqueda DP + Branch & Bound ───────────────────────────────────────
 
-            omegas_ciclo.pop()
-            omegas_ciclo.append(par_candidato)
-
-            vertices = omegas_ciclo
-
-        return min(
-            self.memoria_grupo_candidato,
-            key=lambda k: self.memoria_grupo_candidato[k][indice_emd],
-        )
-
-    def funcion_submodular(
-        self, deltas: Union[tuple, list[tuple]], omegas: list[Union[tuple, list[tuple]]]
-    ):
+    def _dp_buscar(
+        self,
+        restantes: int,
+        costo_acum: float,
+        partes: list[int],
+        k_objetivo: Optional[int] = None,
+    ) -> None:
         """
-        Evalúa el impacto de combinar el conjunto de nodos individual delta y su agrupación con el conjunto omega, calculando la diferencia entre EMD (Earth Mover's Distance) de las configuraciones, en conclusión los nodos delta evaluados individualmente y su combinación con el conjunto omega.
+        Búsqueda recursiva sobre todas las k-particiones válidas.
 
-        El proceso se realiza en dos fases principales:
+        Si k_objetivo es None, busca el mínimo phi sobre todas las k >= 2.
+        Si k_objetivo es un entero, solo acepta particiones con exactamente k partes
+        y aplica podas adicionales:
+          - Si ya hay k partes pero restan nodos sin asignar → poda inmediata.
+          - Si queda solo 1 parte por formar, asigna todos los nodos restantes de
+            golpe (por canonicidad, esta asignación es única e irremovible).
 
-        1. Evaluación Individual:
-           - Crea una copia del estado temporal del subsistema.
-           - Activa los nodos delta en su tiempo correspondiente (presente/futuro).
-           - Si el delta ya fue evaluado antes, recupera su EMD y distribución marginal de memoria
-           - Si no, ha de:
-             * Identificar dimensiones activas en presente y futuro.
-             * Realiza bipartición del subsistema con esas dimensiones.
-             * Calcular la distribución marginal y EMD respecto al subsistema.
-             * Guarda resultados en memoria para seguro un uso futuro.
+        Invariante de ordenación canónica: la próxima parte SIEMPRE incluye el
+        nodo de índice mínimo aún sin asignar (bit_min). Esto garantiza que cada
+        partición única sea generada exactamente una vez, sin contar permutaciones
+        de las mismas partes en distinto orden.
 
-        2. Evaluación Combinada:
-           - Sobre la misma copia temporal, activa también los nodos omega.
-           - Calcula dimensiones activas totales (delta + omega).
-           - Realiza bipartición del subsistema completo.
-           - Obtiene EMD de la combinación.
+        Branch & Bound: si `costo_acum` ya alcanza o supera `_mejor_phi`, la rama
+        completa se abandona, pues agregar más partes no puede reducir el costo total.
 
         Args:
-            deltas: Un nodo individual (tupla) o grupo de nodos (lista de tuplas)
-                   donde cada tupla está identificada por su (tiempo, índice), sea el tiempo t_0 identificado como 0, t_1 como 1 y, el índice hace referencia a las variables/dimensiones habilitadas para operaciones de substracción/marginalización sobre el subsistema, tal que genere la partición.
-            omegas: Lista de nodos ya agrupados, puede contener tuplas individuales
-                   o listas de tuplas para grupos formados por los pares candidatos o más uniones entre sí (grupos candidatos).
-
-        Returns:
-            tuple: (
-                EMD de la combinación omega y delta,
-                EMD del delta individual,
-                Distribución marginal del delta individual
-            )
-            Esto lo hice así para hacer almacenamiento externo de la emd individual y su distribución marginal en las particiones candidatas.
+            restantes  : Máscara de nodos pendientes de asignación.
+            costo_acum : Suma de contribuciones Phi de las partes ya formadas.
+            partes     : Máscaras de las partes ya asignadas (estado mutable compartido).
+            k_objetivo : Número exacto de partes requeridas, o None para buscar todo k>=2.
         """
-        vector_delta_marginal = None
-        self.clave_submodular = [], []
-
-        # Delta #
-
-        clave_delta_actual, clave_delta_efecto = self.definir_clave(deltas)
-        clave_delta = tuple(clave_delta_actual), tuple(clave_delta_efecto)
-
-        idxs_alcance_delta = self.clave_submodular[EFFECT]
-        dims_mecanismo_delta = self.clave_submodular[ACTUAL]
-
-        if clave_delta not in self.memoria_delta:
-            particion_delta = self.sia_subsistema.bipartir(
-                np.array(idxs_alcance_delta, dtype=np.int8),
-                np.array(dims_mecanismo_delta, dtype=np.int8),
+        if restantes == 0:
+            cumple_k = (
+                (k_objetivo is None and len(partes) >= 2)
+                or (k_objetivo is not None and len(partes) == k_objetivo)
             )
-            vector_delta_marginal = particion_delta.distribucion_marginal()
-            emd_delta = emd_efecto(vector_delta_marginal, self.sia_dists_marginales)
-            self.memoria_delta[clave_delta] = emd_delta, vector_delta_marginal
+            if cumple_k and costo_acum < self._mejor_phi:
+                self._mejor_phi = costo_acum
+                self._mejor_particion = list(partes)
+            return
 
-        else:
-            emd_delta, vector_delta_marginal = self.memoria_delta[clave_delta]
+        # Poda Branch & Bound: costo parcial ya alcanzó la cota superior
+        if costo_acum >= self._mejor_phi:
+            return
 
-        # Unión #
+        # Podas adicionales para k exacto
+        if k_objetivo is not None:
+            partes_act = len(partes)
+            if partes_act >= k_objetivo:
+                return  # ya hay k partes pero quedan nodos → imposible
+            if partes_act == k_objetivo - 1:
+                # La última parte debe ser todos los restantes (ordenación canónica)
+                costo_ultima = self._costo_parte(restantes)
+                nuevo_costo = costo_acum + costo_ultima
+                if nuevo_costo < self._mejor_phi:
+                    self._mejor_phi = nuevo_costo
+                    self._mejor_particion = list(partes) + [restantes]
+                return
 
-        for omega in omegas:
-            self.definir_clave(omega)
+        # Nodo de índice mínimo restante → ancla canónica de la próxima parte
+        bit_min = restantes & (-restantes)
+        otros = restantes ^ bit_min  # nodos restantes sin el nodo ancla
 
-        idxs_alcance_union = self.clave_submodular[EFFECT]
-        dims_mecanismo_union = self.clave_submodular[ACTUAL]
+        # Enumerar todos los subconjuntos de `otros` (vacío incluido).
+        # La parte formada = submascara | bit_min (siempre contiene bit_min).
+        submascara = otros
+        while True:
+            parte = submascara | bit_min
+            costo_parte = self._costo_parte(parte)
 
-        particion_union = self.sia_subsistema.bipartir(
-            np.array(idxs_alcance_union, dtype=np.int8),
-            np.array(dims_mecanismo_union, dtype=np.int8),
-        )
-        vector_union_marginal = particion_union.distribucion_marginal()
-        emd_union = emd_efecto(vector_union_marginal, self.sia_dists_marginales)
+            partes.append(parte)
+            self._dp_buscar(restantes ^ parte, costo_acum + costo_parte, partes, k_objetivo)
+            partes.pop()
 
-        return emd_union, emd_delta, vector_delta_marginal
-
-    def definir_clave(
-        self,
-        conjunto: Union[tuple[int, int], list[tuple[int, int]]],
-    ):
-        if isinstance(conjunto, tuple):
-            tiempo, indice = conjunto
-            self.clave_submodular[tiempo].append(indice)
-        else:
-            for tiempo, indice in conjunto:
-                self.clave_submodular[tiempo].append(indice)
-        self.clave_submodular[ACTUAL].sort()
-        self.clave_submodular[EFFECT].sort()
-        return self.clave_submodular
-
-    def nodes_complement(self, nodes: list[tuple[int, int]]):
-        return list(set(self.vertices) - set(nodes))
+            if submascara == 0:
+                break
+            # Siguiente subconjunto estricto de `otros`
+            submascara = (submascara - 1) & otros

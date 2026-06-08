@@ -1,11 +1,9 @@
 from src.controllers.manager import Manager
-
-# 👇 Importación de estrategias 👇 #
-from src.strategies.force import BruteForce
+from src.strategies.q_nodes import DynamicPartition
 
 
 def iniciar():
-    """Punto de entrada"""
+    """Punto de entrada — ejecuta DynamicPartition sobre la red configurada."""
 
     # ABCD #
     estado_inicial = "1000000000"
@@ -16,13 +14,12 @@ def iniciar():
     gestor_redes = Manager(estado_inicial)
     mpt = gestor_redes.cargar_red()
 
-    ### Ejemplo de solución mediante módulo de fuerza bruta ###
-    analizador_bf = BruteForce(mpt)
+    analizador = DynamicPartition(mpt)
 
-    sia_cero = analizador_bf.aplicar_estrategia(
+    solucion = analizador.aplicar_estrategia(
         estado_inicial,
         condiciones,
         alcance,
         mecanismo,
     )
-    print(sia_cero)
+    print(solucion)
