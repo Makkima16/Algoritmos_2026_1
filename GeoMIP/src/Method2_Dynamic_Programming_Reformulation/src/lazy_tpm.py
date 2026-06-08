@@ -230,6 +230,11 @@ class LazyTPM:
                 buf = f.read(1 << 20)
         return count
 
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Compatibilidad con numpy: (n_estados, n_nodos)."""
+        return (self.n_estados, self.n_nodos)
+
     def __repr__(self) -> str:
         return (f"LazyTPM(n_nodos={self.n_nodos}, "
                 f"n_estados={self.n_estados:,}, "

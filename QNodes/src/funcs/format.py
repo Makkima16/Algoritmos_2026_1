@@ -1,5 +1,6 @@
 from src.funcs.iit import ABECEDARY, LOWER_ABECEDARY
 from src.constants.base import BASE_TWO, COLON_DELIM, VOID_STR
+import numpy as np
 
 '''
 Métodos para formatear particiones resultantes de estrategias específicas.
@@ -48,6 +49,60 @@ def fmt_biparticion_q(
     top_dual, bottom_dual = fmt_parte_q(dual, to_sort)
 
     return f"{top_prim}{top_dual}\n{bottom_prim}{bottom_dual}\n"
+
+
+def _bits_activos_fmt(mascara: int):
+    """Genera los índices de bits activos de la máscara en orden ascendente."""
+    m = mascara
+    while m:
+        bit = m & (-m)
+        yield bit.bit_length() - 1
+        m ^= bit
+
+
+def fmt_k_particion_dp(
+    partes_mascaras: list[int],
+    indices_ncubos: np.ndarray,
+    dims_ncubos: np.ndarray,
+    mascaras_vacio: "set[int] | None" = None,
+) -> str:
+    """
+    Formatea una k-partición expresada como lista de máscaras de bits locales.
+
+    Fila superior (MAYÚSCULAS) = nodos futuros/alcance (t+1).
+    Fila inferior (minúsculas) = nodos presentes/mecanismo (t), o ∅ si ninguno
+    o si la máscara aparece en mascaras_vacio (mecanismo vacío explícito).
+
+    Args:
+        partes_mascaras: Lista de enteros-máscara (índices locales 0..N-1).
+        indices_ncubos : Mapeo local → índice global del n-cubo (futuro).
+        dims_ncubos    : Índices globales activos en el mecanismo (presente).
+        mascaras_vacio : Conjunto de máscaras que usan mecanismo vacío (∅).
+    """
+    dims_set = set(int(d) for d in dims_ncubos)
+    vacio_set = mascaras_vacio or set()
+    partes_fmt = []
+
+    for mascara in partes_mascaras:
+        indices_locales = sorted(_bits_activos_fmt(mascara))
+        idxs_reales = [int(indices_ncubos[i]) for i in indices_locales]
+
+        str_fut = COLON_DELIM.join(ABECEDARY[idx] for idx in idxs_reales)
+        if mascara in vacio_set:
+            str_pres = VOID_STR
+        else:
+            str_pres = COLON_DELIM.join(
+                LOWER_ABECEDARY[idx] for idx in idxs_reales if idx in dims_set
+            )
+        str_fut = str_fut if str_fut else VOID_STR
+        str_pres = str_pres if str_pres else VOID_STR
+
+        ancho = max(len(str_fut), len(str_pres)) + BASE_TWO
+        partes_fmt.append((f"⎛{str_fut:^{ancho}}⎞", f"⎝{str_pres:^{ancho}}⎠"))
+
+    linea_top = "".join(t for t, _ in partes_fmt)
+    linea_bot = "".join(b for _, b in partes_fmt)
+    return f"{linea_top}\n{linea_bot}\n"
 
 
 def fmt_parte_q(

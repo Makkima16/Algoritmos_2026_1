@@ -102,6 +102,7 @@ class Solution:
         distribucion_particion: np.ndarray,
         particion,
         tiempo_total: float = FLOAT_ZERO,
+        tiempo_preparacion: float = FLOAT_ZERO,
         hablar: bool = True,
         voz: Optional[str] = None,
     ) -> None:
@@ -115,6 +116,7 @@ class Solution:
         self.distribucion_particion = distribucion_particion
         self.particion = particion
         self.tiempo_ejecucion = tiempo_total
+        self.tiempo_preparacion = tiempo_preparacion
         self.id_voz = voz
         self.hablar = hablar
 

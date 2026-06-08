@@ -21,6 +21,9 @@ from src.constants.error import (
 
 _CANDIDATO_CACHE: dict = {}
 
+# Caché para subsistemas completos (clave: id(tpm), estado, condicion, alcance, mecanismo)
+_SUBSISTEMA_CACHE: dict = {}
+
 
 class SIA(ABC):
     """
@@ -42,6 +45,7 @@ class SIA(ABC):
         self.sia_subsistema: System
         self.sia_dists_marginales: NDArray[np.float32]
         self.sia_tiempo_inicio: float = FLOAT_ZERO
+        self.sia_tiempo_preparacion: float = FLOAT_ZERO
 
     @abstractmethod
     def aplicar_estrategia(self):
@@ -86,6 +90,8 @@ class SIA(ABC):
             [ind for ind, bit in enumerate(mecanismo) if bit == STR_ZERO], dtype=np.int8
         )
 
+        t_prep_start = time.time()
+
         # Preparar directorio de salida
         self.sia_gestor.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -108,13 +114,24 @@ class SIA(ABC):
             self.sia_logger.critic("Candidato creado.")
             _CANDIDATO_CACHE[cache_key] = candidato
 
-        subsistema = candidato.substraer(dims_alcance, dims_mecanismo)
-        self.sia_logger.critic("Subsistema creado.")
+        # Intentar cargar subsistema desde caché (incluye alcance y mecanismo)
+        subs_key = (id(tpm), tuple(estado_inicial.tolist()), condicion, alcance, mecanismo)
+        if subs_key in _SUBSISTEMA_CACHE:
+            subsistema = _SUBSISTEMA_CACHE[subs_key]
+            self.sia_logger.critic("Subsistema cargado desde caché de subsistemas.")
+        else:
+            subsistema = candidato.substraer(dims_alcance, dims_mecanismo)
+            self.sia_logger.critic("Subsistema creado.")
+            _SUBSISTEMA_CACHE[subs_key] = subsistema
         # self.sia_logger.debug(f"{dims_alcance, dims_mecanismo=}")
         # self.sia_logger.debug(subsistema)
 
+        # Calcular distribuciones y marcar tiempos
         self.sia_subsistema = subsistema
         self.sia_dists_marginales = subsistema.distribucion_marginal()
+        t_prep_end = time.time()
+        self.sia_tiempo_preparacion = t_prep_end - t_prep_start
+        # El inicio del conteo para la búsqueda comienza justo después de la preparación
         self.sia_tiempo_inicio = time.time()
 
     def chequear_parametros(self, candidato: str, futuro: str, presente: str):
