@@ -55,7 +55,7 @@ class SIA(ABC):
 
     def sia_cargar_tpm(self):
         """Carga TPM desde archivo usando evaluación lazy para N>18."""
-        from src.lazy_tpm import cargar_tpm
+        from lazy_tpm import cargar_tpm
         return cargar_tpm(
             self.sia_gestor.tpm_filename
         )

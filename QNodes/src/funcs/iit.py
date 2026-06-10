@@ -13,6 +13,12 @@ from src.constants.base import (
 )
 from src.models.base.application import aplicacion
 from src.models.enums.distance import MetricDistance
+
+# Para N <= HAMMING_EMD_MAX_N se usa EMD real con matriz Hamming (igual que GeoMIP).
+# Para N > HAMMING_EMD_MAX_N se usa suma L1 marginal (aproximación rápida).
+HAMMING_EMD_MAX_N: int = 12
+
+_HAMMING_CACHE: dict[int, np.ndarray] = {}
 from src.models.enums.notation import Notation
 from src.models.enums.temporal_emd import TimeEMD
 
@@ -115,33 +121,18 @@ def emd_efecto(u: NDArray[np.float32], v: NDArray[np.float32]) -> float:
 
 def emd_causal(u: NDArray[np.float64], v: NDArray[np.float64]) -> float:
     """
-    Implementación de la Earth Mover's Distance para el análissi desde el presente hacia el pasado.
-    Sean `X_1`, `X_2` dos variables aleatorias con su correspondiente espacio de estados. Si `X_1` y `X_2` son dependientes y `u_1`, `v_1` dos distribuciones de probabilidad en `X_1` y `u_2`, `v_2` dos distribuciones de probabilidad en `X_2`.
-
-    Args:
-        `u` (NDArray[np.float64]): Histograma/distribución/vector/serie donde cada indice asocia un valor de pobabilidad de tener el nodo en estado OFF.
-        `v` (NDArray[np.float64]): Histograma/distribución/vector/serie donde cada indice asocia un valor de pobabilidad de tener el nodo en estado OFF.
-
-    Returns:
-        float: La EMD entre los repertorios causal es igual a la suma entre las EMD de las distribuciones marginales de cada nodo, de forma que la EMD entre las distribuciones marginales para un nodo es la diferencia absoluta entre las probabilidades con el nodo OFF.
+    Earth Mover's Distance real con distancia de Hamming como métrica base.
+    Usa caché para la matriz de costes — O(2^N × 2^N) en primera llamada, O(1) después.
     """
     try:
-        from pyemd import emd
+        from pyemd import emd as _pyemd
 
         if not all(isinstance(arr, np.ndarray) for arr in [u, v]):
             raise TypeError("u and v must be numpy arrays.")
 
         n: int = u.size
-        coste: NDArray[np.float64] = np.empty((n, n))
-        distancia_metrica: Callable = seleccionar_distancia()
-
-        for i in range(n):
-            coste[i, :i] = [distancia_metrica(i, j) for j in range(i)]
-            coste[:i, i] = coste[i, :i]
-        np.fill_diagonal(coste, INT_ZERO)
-
-        mat_costes: NDArray[np.float64] = np.array(coste, dtype=np.float64)
-        return emd(u, v, mat_costes)
+        mat_costes = get_hamming_matrix(n)
+        return _pyemd(u.astype(np.float64), v.astype(np.float64), mat_costes)
     except ImportError as e:
         print(f"pyemd no está instalado correctamente: {e}")
         return -1
@@ -188,6 +179,32 @@ def hamming_distance(a: int, b: int) -> int:
         int: La distancia de Hamming entre los dos números.
     """
     return count_bits(a ^ b)
+
+
+def get_hamming_matrix(n: int) -> np.ndarray:
+    """Devuelve (y cachea) la matriz de costes Hamming de tamaño n×n."""
+    if n not in _HAMMING_CACHE:
+        costs = np.empty((n, n), dtype=np.float64)
+        for i in range(n):
+            costs[i, :i] = [hamming_distance(i, j) for j in range(i)]
+            costs[:i, i] = costs[i, :i]
+        np.fill_diagonal(costs, 0.0)
+        _HAMMING_CACHE[n] = costs
+    return _HAMMING_CACHE[n]
+
+
+def distribucion_conjunta_vectorizada(probabilidades: np.ndarray) -> np.ndarray:
+    """
+    Distribución conjunta 2^N a partir de N probabilidades marginales P(nodo=ON).
+    Asume independencia entre nodos (igual que GeoMIP para la reconstrucción).
+    """
+    if len(probabilidades) == 0:
+        return np.array([1.0], dtype=np.float64)
+    p_on = np.asarray(probabilidades, dtype=np.float64)
+    p_off = 1.0 - p_on
+    factors = np.stack([p_off, p_on], axis=1)  # factors[i] = [P(i=OFF), P(i=ON)]
+    grid = np.meshgrid(*factors, indexing="ij")
+    return np.prod(grid, axis=0).flatten()
 
 
 def count_bits(n: int) -> int:

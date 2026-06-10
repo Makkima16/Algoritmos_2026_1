@@ -313,7 +313,7 @@ class System:
             if ncubo.dims.size:
                 sub_estado_inicial = tuple(self.estado_inicial[j] for j in ncubo.dims)
                 probabilidad = ncubo.data[seleccionar_subestado(sub_estado_inicial)]
-            distribuciones[i] = 1 - probabilidad
+            distribuciones[i] = probabilidad
         return distribuciones
 
     def producto_tensorial(self, distribuciones_marginales: list[NDArray[np.float32]]) -> NDArray[np.float32]:

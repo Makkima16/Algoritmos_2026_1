@@ -8,7 +8,7 @@ El objetivo principal de ambos frameworks es encontrar la partición óptima de 
 
 Existen dos enfoques principales en el repositorio:
 1. **GeoMIP:** Framework original interactivo (`GeoMIP/src/Method2_Dynamic_Programming_Reformulation/`) que aborda el problema k-MIP paralelizando los cálculos de múltiples tamaños de partición $k$ e implementando heurísticas combinatorias (ej. clustering jerárquico bottom-up) para reducir la complejidad cuando las dimensiones son muy altas.
-2. **QNodes:** Nuevo framework (`QNodes/`) centrado en una estrategia de **Programación Dinámica con Memoización** (`DynamicPartition`). Su enfoque consiste en precalcular y cachear distribuciones marginales de cada subparte en lugar de recalcularlas por cada partición entera, para poder evaluar sub-particiones óptimas sobre todos los valores posibles de $k$ (desde 2 hasta $N$) evitando la explosión combinatoria.
+2. **QNodes:** Nuevo framework (`QNodes/`) centrado en **agrupamiento jerárquico aglomerativo greedy con memoización** (`QNodes` / alias `DynamicPartition`). Aplica tres fases para todo N sin excepciones: (1) agrupamiento greedy O(N³) que construye un historial completo de k-particiones, (2) refinamiento local 1-move hasta convergencia, y (3) evaluación exhaustiva de candidatos de aislamiento C(N, k-1). Para k libre, las tres fases se ejecutan sobre cada nivel k del historial y se elige el k con menor Φ global. La métrica interna de `_emd_particion` usa Wasserstein-1 con d_Hamming para N ≤ 12 y suma L1 para N > 12 (detalle de implementación transparente para la estrategia).
 
 ---
 
@@ -66,11 +66,14 @@ exec_kgeomip.py
 ### QNodes Pipelíne (`exec.py`)
 ```
 exec.py
-  └── DynamicPartition(aplicacion)
-        ├── 1. Cargar estado inicial y TPM.
-        ├── 2. Identificar alcance y mecanismo a evaluar.
-        ├── 3. Encontrar particiones minimizando pérdida cacheando distribuciones marginales.
-        └── 4. Retornar las particiones con Phi mínimo explorando ágilmente todo el rango de k.
+  └── QNodes.aplicar_estrategia(estado, condicion, alcance, mecanismo, k)
+        ├── 1. Preparar subsistema (condicionar TPM al estado inicial).
+        ├── 2. _aglomerar() — jerarquía greedy O(N³); retorna historico{k: (phi, grupos)}.
+        ├── 3. Para cada k evaluado (el dado o todos si k=None):
+        │       _refinamiento_local() — 1-move hasta convergencia.
+        │       _candidatos_aislamiento(k) — C(N, k-1) candidatos con nodos aislados.
+        │       _refinamiento_local() nuevamente si mejora.
+        └── 4. Retornar k-partición con Phi mínimo (k ≥ 3 preferido si k=None).
 ```
 
 ---

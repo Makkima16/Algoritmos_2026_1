@@ -11,7 +11,14 @@
       "Bash(Find \"C:\\\\universidad\\\\Analisis y Diseño de Algoritmos\\\\AYDA_2026_1\" -type f -name \"*.md\")",
       "Bash(.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('GeoMIP/src/Method2_Dynamic_Programming_Reformulation/src/controllers/strategies/kgeomip.py'\\).read\\(\\)\\); print\\('OK: sintaxis válida'\\)\")",
       "Bash(.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('GeoMIP/src/Method2_Dynamic_Programming_Reformulation/src/controllers/strategies/kgeomip.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK: sintaxis valida'\\)\")",
-      "Bash(.venv\\\\Scripts\\\\python.exe -c \"import ast; ast.parse\\(open\\('QNodes/exec.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Sintaxis OK'\\)\")"
+      "Bash(.venv\\\\Scripts\\\\python.exe -c \"import ast; ast.parse\\(open\\('QNodes/exec.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Sintaxis OK'\\)\")",
+      "PowerShell(& \"C:\\\\universidad\\\\Analisis y Diseño de Algoritmos\\\\AYDA_2026_1\\\\.venv\\\\Scripts\\\\python.exe\" -m pip list --format=freeze 2>&1)",
+      "PowerShell(& \"C:\\\\universidad\\\\Analisis y Diseño de Algoritmos\\\\AYDA_2026_1\\\\.venv\\\\Scripts\\\\pip.exe\" install -e \"C:\\\\universidad\\\\Analisis y Diseño de Algoritmos\\\\AYDA_2026_1\\\\QNodes\" 2>&1)",
+      "PowerShell(& \"C:\\\\universidad\\\\Analisis y Diseño de Algoritmos\\\\AYDA_2026_1\\\\.venv\\\\Scripts\\\\pip.exe\" install -e \"C:\\\\universidad\\\\Analisis y Diseño de Algoritmos\\\\AYDA_2026_1\\\\QNodes\" 2>&1 | Out-String)",
+      "Bash(.venv/Scripts/pip install *)",
+      "Bash(echo \"EXIT: $?\")",
+      "Read(//tmp/**)",
+      "Bash(\"/c/universidad/Analisis y *)"
     ]
   }
 }
