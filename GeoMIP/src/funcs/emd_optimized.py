@@ -52,7 +52,7 @@ def emd_causal_fast_partition(
     # El flujo en KGeoMIP para N > 12 debe siempre pasar las marginales pre calculadas.
     n_total = len(dist_original)
     if n_total <= 4096:  # O sea N <= 12
-        from src.funcs.base import emd_causal as emd_causal_exact
+        from funcs.base import emd_causal as emd_causal_exact
         return emd_causal_exact(dist_original, dist_reconstruida)
 
     raise ValueError(

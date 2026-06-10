@@ -41,7 +41,7 @@ from src.controllers.strategies.kgeomip import _serializar_particion
 from src.funcs.base import ABECEDARY
 from src.lazy_tpm import cargar_tpm
 
-GEOMIP_ROOT   = Path(__file__).resolve().parents[2]
+GEOMIP_ROOT   = Path(__file__).resolve().parent
 SAMPLES_DIR   = GEOMIP_ROOT / "data" / "samples_binary"
 PRUEBAS_DIR   = GEOMIP_ROOT / "data" / "Pruebas"
 
@@ -239,6 +239,21 @@ def _pedir_estado(n_candidatos: int, bits_candidato: str, n_nodos: int) -> tuple
         return estado_candidato, estado
 
 
+def _pedir_permitir_presente_vacio() -> bool:
+    """Pregunta si se permite mecanismo vacío (∅) en las partes."""
+    opcion = input(
+        "\n ¿Permitir mecanismo vacío (∅) en las partes?\n"
+        "   1. No (por defecto) — cada parte usa el mecanismo completo de sus nodos\n"
+        "   2. Sí — permite que algunas partes usen mecanismo ∅ (mayor exploración)\n"
+        " Seleccione (1 o 2) o [ENTER] para No: "
+    ).strip()
+    if opcion == "2":
+        print(" Mecanismo vacío (∅) HABILITADO.")
+        return True
+    print(" Mecanismo vacío (∅) deshabilitado (por defecto).")
+    return False
+
+
 def _guardar_resultado_single(
     ruta_archivo: Path,
     estado: str,
@@ -257,7 +272,7 @@ def _guardar_resultado_single(
     k_val_str = match_k.group(1) if match_k else "optimal"
 
     fecha_actual  = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    nombre_archivo = f"{fecha_actual}_resultado_{ruta_archivo.stem}_k{k_val_str}_global.json"
+    nombre_archivo = f"resultado_{ruta_archivo.stem}_k{k_val_str}_{fecha_actual}.json"
     ruta_salida   = results_dir / nombre_archivo
 
     tiempo_seg  = float(
@@ -617,6 +632,8 @@ def modo_manual(ruta_archivo: Path, tpm: np.ndarray, n_nodos: int):
         print(f" Se evaluará K = {k_a_evaluar}")
         break
 
+    permitir_vacio = _pedir_permitir_presente_vacio()
+
     # ── Resumen y ejecución ────────────────────────────────────────────────
     sep(" Iniciando Algoritmo — KGeoMIP Partición Óptima Global")
     print(f"   Dataset Cargado : {ruta_archivo.name}")
@@ -625,9 +642,10 @@ def modo_manual(ruta_archivo: Path, tpm: np.ndarray, n_nodos: int):
     print(f"   Alcance (t+1)   : {bits_alcance}")
     print(f"   Mecanismo (t)   : {bits_mecanismo}")
     if k_a_evaluar:
-        print(f"   K a evaluar     : {k_a_evaluar}\n")
+        print(f"   K a evaluar     : {k_a_evaluar}")
     else:
-        print(f"   K a evaluar     : Todas (2..{min(5, n_candidatos)})\n")
+        print(f"   K a evaluar     : Todas (2..{min(5, n_candidatos)})")
+    print(f"   Presente vacío  : {'Sí' if permitir_vacio else 'No'}\n")
 
     manager_inst   = Manager(estado)
     kgeomip_inst   = KGeoMIP(manager_inst)
@@ -636,7 +654,8 @@ def modo_manual(ruta_archivo: Path, tpm: np.ndarray, n_nodos: int):
         alcance=bits_alcance,
         mecanismo=bits_mecanismo,
         tpm=tpm,
-        k=k_a_evaluar
+        k=k_a_evaluar,
+        permitir_presente_vacio=permitir_vacio,
     )
 
     print(solucion_geomip)
@@ -691,13 +710,16 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
         print(f" K global = {k_val_global}")
         break
 
+    permitir_vacio = _pedir_permitir_presente_vacio()
+
     # Seleccionar CSV de pruebas desde terminal
     print(f"\n Buscando archivos de pruebas para N={n_nodos}...")
     ruta_csv = _seleccionar_csv_pruebas(n_nodos)
     print(f" CSV seleccionado: {ruta_csv.name}")
 
-    # Ruta de salida fija: results/block/<fecha>_results_kGeoMIP_N{n}_k{k}.xlsx
-    results_block_dir = GEOMIP_ROOT / "results" / "block"
+    # Ruta de salida: results/block/<subcarpeta>/<fecha>_results_kGeoMIP_N{n}_k{k}.xlsx
+    subcarpeta = "con_estado_vacio" if permitir_vacio else "sin_estado_vacio"
+    results_block_dir = GEOMIP_ROOT / "results" / "block" / subcarpeta
     results_block_dir.mkdir(parents=True, exist_ok=True)
     fecha_actual  = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     nombre_excel  = f"results_kGeoMIP_N{n_nodos}_k{k_nombre}_{fecha_actual}.xlsx"
@@ -733,6 +755,7 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
     print(f"   Sist. Candidato : {bits_candidato}  ({n_candidatos} nodos)")
     print(f"   Estado Inicial  : {estado}")
     print(f"   K global        : {k_nombre}")
+    print(f"   Presente vacío  : {'Sí' if permitir_vacio else 'No'}")
     print(f"   Salida          : {ruta_salida}\n")
 
     pruebas_para_excel = sorted(
@@ -846,6 +869,7 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
                     mecanismo=bits_mecanismo,
                     tpm=tpm,
                     k=k_val_global,
+                    permitir_presente_vacio=permitir_vacio,
                 )
             finally:
                 _restaurar_consola()

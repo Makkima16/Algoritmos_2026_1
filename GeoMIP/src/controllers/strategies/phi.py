@@ -1,8 +1,8 @@
 import time
 import numpy as np
-from src.funcs.base import ABECEDARY, lil_endian
-from src.funcs.format import fmt_biparticion
-from src.controllers.manager import Manager
+from funcs.base import ABECEDARY, lil_endian
+from funcs.format import fmt_biparticion
+from controllers.manager import Manager
 
 import math
 import collections
@@ -22,21 +22,21 @@ from pyphi import Network, Subsystem
 from pyphi.labels import NodeLabels
 from pyphi.models.cuts import Bipartition, Part
 
-from src.middlewares.slogger import SafeLogger
-from src.middlewares.profile import profiler_manager, profile
+from middlewares.slogger import SafeLogger
+from middlewares.profile import profiler_manager, profile
 
-from src.models.base.sia import SIA
-from src.models.core.solution import Solution
-from src.models.enums.distance import MetricDistance
-from src.models.base.application import aplicacion
+from models.base.sia import SIA
+from models.core.solution import Solution
+from models.enums.distance import MetricDistance
+from models.base.application import aplicacion
 
 
-from src.constants.base import (
+from constants.base import (
     NET_LABEL,
     TYPE_TAG,
     STR_ONE,
 )
-from src.constants.models import (
+from constants.models import (
     DUMMY_ARR,
     DUMMY_PARTITION,
     PYPHI_LABEL,

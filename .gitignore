@@ -67,8 +67,8 @@ build/
 /GeoMIP/data/Pruebas
 
 # QNodes
-/QNodes/src/.samples
-/QNodes/.docs
+/QNodes/data
+
 
 # Logs
 logs

@@ -51,7 +51,7 @@ KGEOMIP_STRATEGY_TAG: str = f"{KGEOMIP_LABEL}_strategy"
 KGEOMIP_ANALYSIS_TAG: str = f"{KGEOMIP_LABEL}_analysis"
 
 # Mantener la posibilidad de que una parte tenga mecanismo vacío (∅).
-PERMITIR_PRESENTE_VACIO_POR_DEFECTO: bool = False
+PERMITIR_PRESENTE_VACIO_POR_DEFECTO: bool = True
 
 N_JOBS_INTERNOS: int = max(1, multiprocessing.cpu_count() - 1)
 

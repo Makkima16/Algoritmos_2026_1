@@ -21,9 +21,8 @@ import sys
 import csv
 import json
 import random
+import re
 import time
-import tkinter as tk
-from tkinter import filedialog
 from pathlib import Path
 from datetime import datetime
 
@@ -37,8 +36,10 @@ from src.strategies.q_nodes import DynamicPartition, PERMITIR_PRESENTE_VACIO_POR
 from src.funcs.iit import ABECEDARY
 from src.middlewares.profile import gestor_perfilado
 
-QNODES_ROOT = Path(__file__).resolve().parent
-SAMPLES_DIR = QNODES_ROOT / "src" / ".samples"
+QNODES_ROOT           = Path(__file__).resolve().parent
+SAMPLES_BINARY_DIR    = QNODES_ROOT / "data" / "samples_binary"
+SAMPLES_NO_BINARY_DIR = QNODES_ROOT / "data" / "samples_no_binary"
+PRUEBAS_DIR           = QNODES_ROOT / "data" / "Pruebas"
 
 
 # ── Utilidades de presentación ─────────────────────────────────────────────
@@ -68,40 +69,95 @@ def formatear_tiempo(segundos: float) -> str:
 # ── Helpers de entrada ─────────────────────────────────────────────────────
 
 def _seleccionar_tpm() -> tuple:
-    """Abre diálogo para seleccionar la TPM y la carga. Retorna (ruta, tpm, n_nodos)."""
-    print(" Abriendo explorador de archivos en la carpeta de datasets...")
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-        ruta_str = filedialog.askopenfilename(
-            initialdir=str(SAMPLES_DIR),
-            title="Seleccionar matriz de probabilidad (TPM) CSV",
-            filetypes=(("CSV files", "*.csv"), ("All files", "*.*"))
-        )
-        root.destroy()
-    except Exception as e:
-        print(f" No se pudo cargar el explorador: {e}")
-        archivo = input(" Ingrese manualmente el nombre del archivo (ej. N3A.csv): ").strip()
-        ruta_str = str(SAMPLES_DIR / archivo)
+    """Pide N y tipo (binaria/no binaria) en terminal, lista los archivos que coincidan y deja elegir.
+    Opción 0 para volver a ingresar N. Retorna (ruta, tpm, n_nodos)."""
+    while True:
+        n_str = input("\n Ingrese el tamaño N (número de nodos) de la TPM a cargar: ").strip()
+        if not n_str.isdigit():
+            print(" Error: ingrese un número entero válido.")
+            continue
+        n = int(n_str)
 
-    if not ruta_str:
-        print(" Ejecución cancelada: No se seleccionó ningún archivo.")
-        sys.exit(1)
+        while True:
+            tipo = input(
+                "\n ¿Qué tipo de TPM desea cargar?\n"
+                "   1. Binaria      — carpeta samples_binary\n"
+                "   2. No binaria   — carpeta samples_no_binary\n"
+                " Seleccione (1 o 2): "
+            ).strip()
+            if tipo in ("1", "2"):
+                break
+            print(" Error: ingrese 1 o 2.")
 
-    ruta = Path(ruta_str)
-    if not ruta.exists():
-        print(f" Error: El archivo {ruta} no fue encontrado.")
-        sys.exit(1)
+        directorio_tpm = SAMPLES_BINARY_DIR if tipo == "1" else SAMPLES_NO_BINARY_DIR
 
-    try:
-        tpm = np.genfromtxt(ruta, delimiter=',')
-        n_nodos = tpm.shape[1]
-    except Exception as e:
-        print(f" Error al leer el fichero TPM: {e}")
-        sys.exit(1)
+        patron   = re.compile(rf'^N{n}\D', re.IGNORECASE)
+        archivos = sorted(f for f in directorio_tpm.glob("*.csv") if patron.match(f.name))
 
-    return ruta, tpm, n_nodos
+        if not archivos:
+            disponibles = sorted(directorio_tpm.glob("*.csv"))
+            print(f"\n No se encontraron archivos con N={n} en '{directorio_tpm.name}'.")
+            if disponibles:
+                print(f" Archivos disponibles: {[f.name for f in disponibles]}")
+            print(" Intente con otro N.")
+            continue
+
+        print(f"\n Archivos disponibles para N={n} ({directorio_tpm.name}):")
+        for i, archivo in enumerate(archivos, 1):
+            print(f"   {i}. {archivo.name}")
+        print(f"   0. Volver a elegir N")
+
+        while True:
+            sel = input(f" Seleccione un archivo [1-{len(archivos)}] o 0 para volver: ").strip()
+            if sel == "0":
+                break
+            if sel.isdigit() and 1 <= int(sel) <= len(archivos):
+                ruta = archivos[int(sel) - 1]
+                try:
+                    tpm     = np.genfromtxt(ruta, delimiter=',')
+                    n_nodos = tpm.shape[1]
+                except Exception as e:
+                    print(f" Error al leer la TPM: {e}")
+                    sys.exit(1)
+                return ruta, tpm, n_nodos
+            print(f" Error: seleccione un número entre 1 y {len(archivos)}, o 0 para volver.")
+
+
+def _seleccionar_csv_pruebas(n_nodos: int) -> Path:
+    """Lista los archivos de Pruebas que coincidan con N y deja elegir.
+    Opción 0 para volver a ingresar N."""
+    n = n_nodos
+    while True:
+        patron   = re.compile(rf'[_\-]N{n}[_\-.]', re.IGNORECASE)
+        archivos = sorted(f for f in PRUEBAS_DIR.glob("*.csv") if patron.search(f.name))
+
+        if not archivos:
+            disponibles = sorted(PRUEBAS_DIR.glob("*.csv"))
+            print(f"\n No se encontraron archivos de pruebas para N={n} en '{PRUEBAS_DIR.name}'.")
+            if disponibles:
+                print(f" Archivos disponibles: {[f.name for f in disponibles]}")
+        else:
+            print(f"\n Archivos de pruebas disponibles para N={n}:")
+            for i, archivo in enumerate(archivos, 1):
+                print(f"   {i}. {archivo.name}")
+            print(f"   0. Volver a elegir N")
+
+            while True:
+                sel = input(f" Seleccione un archivo [1-{len(archivos)}] o 0 para volver: ").strip()
+                if sel == "0":
+                    break
+                if sel.isdigit() and 1 <= int(sel) <= len(archivos):
+                    return archivos[int(sel) - 1]
+                print(f" Error: seleccione un número entre 1 y {len(archivos)}, o 0 para volver.")
+
+        n_nuevo = input(" Ingrese el N deseado para las pruebas (o [ENTER] para cancelar): ").strip()
+        if not n_nuevo:
+            print(" Ejecución cancelada.")
+            sys.exit(1)
+        if n_nuevo.isdigit():
+            n = int(n_nuevo)
+        else:
+            print(" Error: ingrese un número entero válido.")
 
 
 def _pedir_candidato(n_nodos: int) -> tuple:
@@ -231,7 +287,8 @@ def _guardar_resultado_single(
     results_dir.mkdir(parents=True, exist_ok=True)
 
     fecha_actual = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    nombre_archivo = f"{fecha_actual}_qnodes_{ruta_archivo.stem}.json"
+    k_str = str(k_elegido) if k_elegido is not None else "All"
+    nombre_archivo = f"resultado_{ruta_archivo.stem}_k{k_str}_{fecha_actual}.json"
     ruta_salida = results_dir / nombre_archivo
 
     res_data = {
@@ -502,35 +559,16 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
     # Opción de mecanismo vacío
     permitir_vacio = _pedir_permitir_presente_vacio()
 
-    # Seleccionar CSV de pruebas
-    print("\n Seleccione el archivo CSV con las pruebas...")
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-        ruta_csv_str = filedialog.askopenfilename(
-            title="Seleccionar CSV de pruebas",
-            filetypes=(("CSV files", "*.csv"), ("All files", "*.*"))
-        )
-        root.destroy()
-    except Exception as e:
-        print(f" No se pudo abrir el explorador: {e}")
-        ruta_csv_str = input(" Ingrese la ruta del CSV de pruebas: ").strip()
+    # Seleccionar CSV de pruebas desde terminal
+    print(f"\n Buscando archivos de pruebas para N={n_nodos}...")
+    ruta_csv = _seleccionar_csv_pruebas(n_nodos)
+    print(f" CSV seleccionado: {ruta_csv.name}")
 
-    if not ruta_csv_str:
-        print(" Ejecución cancelada: No se seleccionó CSV de pruebas.")
-        sys.exit(1)
-
-    ruta_csv = Path(ruta_csv_str)
-    if not ruta_csv.exists():
-        print(f" Error: No se encontró el archivo {ruta_csv}.")
-        sys.exit(1)
-
-    # Ruta de salida fija: results/block/<fecha>_qnodes_N<n>_k<k>.xlsx
-    results_block_dir = QNODES_ROOT / "results" / "block"
+    subcarpeta = "con_estado_vacio" if permitir_vacio else "sin_estado_vacio"
+    results_block_dir = QNODES_ROOT / "results" / "block" / subcarpeta
     results_block_dir.mkdir(parents=True, exist_ok=True)
     fecha_actual = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    nombre_excel = f"{fecha_actual}_qnodes_N{n_nodos}_k{k_nombre}.xlsx"
+    nombre_excel = f"results_KQNodes_N{n_nodos}_k{k_nombre}_{fecha_actual}.xlsx"
     ruta_salida = results_block_dir / nombre_excel
 
     # Leer CSV
