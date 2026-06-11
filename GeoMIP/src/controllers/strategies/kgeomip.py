@@ -29,9 +29,8 @@ except ImportError:
     _SKLEARN_DISPONIBLE = False
 
 from src.controllers.manager import Manager
-from src.funcs.base import emd_causal, ABECEDARY, LOWER_ABECEDARY
+from src.funcs.base import ABECEDARY, LOWER_ABECEDARY
 from src.funcs.format import fmt_biparte_q
-from src.funcs.emd_optimized import emd_causal_fast_partition
 from src.middlewares.slogger import SafeLogger
 from src.middlewares.profile import profiler_manager, profile
 from src.models.base.sia import SIA
@@ -42,6 +41,7 @@ from src.constants.base import (
     EFECTO,
     TYPE_TAG,
     VOID_STR,
+    COST_TABLE_CHUNK_ROWS,
 )
 
 
@@ -55,7 +55,24 @@ PERMITIR_PRESENTE_VACIO_POR_DEFECTO: bool = True
 
 N_JOBS_INTERNOS: int = max(1, multiprocessing.cpu_count() - 1)
 
+# (frozenset global futuros, frozenset global presentes)
+# Permite cortes asimétricos: futuros y presentes se particionan independientemente.
+Block = tuple
 
+
+def _popcount_vec(x: np.ndarray) -> np.ndarray:
+    """
+    Vectorized popcount (Hamming weight) for uint32 arrays using byte unpacking.
+
+    Args:
+        x: Array of non-negative integers cast to uint32.
+
+    Returns:
+        int32 array with bit counts for each element.
+    """
+    x_u32 = np.asarray(x, dtype=np.uint32)
+    x_bytes = x_u32.view(np.uint8).reshape(-1, 4)
+    return np.unpackbits(x_bytes, axis=1).sum(axis=1).astype(np.int32)
 
 
 def _generar_candidatos_aislamiento(
@@ -233,21 +250,6 @@ def _refinar_particion_local(
     return mejor_perdida, mejor_particion
 
 
-def distribucion_conjunta_vectorizada(probabilidades: np.ndarray) -> np.ndarray:
-    """
-    Construye la distribución conjunta P de tamaño 2^N a partir de N probabilidades marginales p_i.
-    Vectorizado y sin bucles for explícitos utilizando meshgrid y prod.
-    """
-    if len(probabilidades) == 0:
-        return np.array([1.0], dtype=np.float64)
-    p_1 = np.asarray(probabilidades, dtype=np.float64)
-    p_0 = 1.0 - p_1
-    factors = np.stack([p_0, p_1], axis=1)
-    grid = np.meshgrid(*factors, indexing='ij')
-    dist = np.prod(grid, axis=0).flatten()
-    return dist
-
-
 def evaluar_k_particion(
     subsistema,
     indices_ncubos: np.ndarray,
@@ -255,13 +257,27 @@ def evaluar_k_particion(
     particion: Tuple[List[int], ...],
     dist_original: np.ndarray,
 ) -> float:
+    """
+    Compute the EMD loss for a k-partition using marginal L1 distance.
+
+    Args:
+        subsistema      : Conditioned subsystem with bipartir() support.
+        indices_ncubos  : Global indices of the subsystem n-cubes.
+        dims_ncubos     : Active mechanism dimensions of the subsystem.
+        particion       : Tuple of k lists of local variable indices.
+                          A list beginning with sentinel -1 means empty mechanism (∅).
+        dist_original   : Marginal distribution vector of size N (P(node=1) per node).
+
+    Returns:
+        float: EMD loss (sum of marginal L1 differences).
+    """
     n = len(dist_original)
     dist_reconstruida = np.empty(n, dtype=np.float64)
 
     for parte in particion:
         if not parte:
             continue
-        # Centinela -1 al inicio → mecanismo vacío (∅): futuro no depende del presente
+        # Sentinel -1 at start → empty mechanism (∅): future does not depend on present
         if parte[0] == -1:
             parte_real = parte[1:]
             presentes_parte = np.array([], dtype=np.int8)
@@ -277,18 +293,58 @@ def evaluar_k_particion(
         for idx_pos in parte_real:
             dist_reconstruida[idx_pos] = dist_parte[idx_pos]
 
-    # Para N >= 13, la matriz de Hamming (2^N × 2^N) excede 512 MB y causa OOM.
-    if n < 13:
-        dist_P_conjunta = distribucion_conjunta_vectorizada(dist_original)
-        dist_Q_conjunta = distribucion_conjunta_vectorizada(dist_reconstruida)
-        return float(emd_causal(dist_P_conjunta, dist_Q_conjunta))
-    else:
-        return emd_causal_fast_partition(
-            dist_original=dist_original,
-            dist_reconstruida=dist_reconstruida,
-            n_nodos=n,
-            use_marginal=True
-        )
+    # dist_original and dist_reconstruida are always marginal vectors of size N
+    # (probability ON per node). For conditionally independent parts — which is
+    # guaranteed by construction in any k-partition — EMD with Hamming cost on
+    # the joint 2^N equals the marginal L1 sum exactly (marginal decomposition
+    # theorem for the Hamming hypercube). Valid for all N with no size restriction.
+    return float(np.sum(np.abs(dist_original - dist_reconstruida)))
+
+def evaluar_corte_asimetrico(
+    subsistema,
+    future_1: "List[int]",
+    present_1: "List[int]",
+    future_2: "List[int]",
+    present_2: "List[int]",
+    dist_original: np.ndarray,
+) -> float:
+    """
+    Evaluate an asymmetric bipartition where each block's future and present
+    sets are specified independently (not necessarily symmetric).
+
+    Unlike evaluar_k_particion, which derives present_i as the intersection of
+    future_i with dims_ncubos, this function accepts arbitrary present sets so
+    that the mechanism of each block can differ from its future coverage.
+
+    Args:
+        subsistema   : Conditioned subsystem with bipartir() support.
+        future_1     : Real node indices (global) for block-1 future (alcance).
+        present_1    : Real node indices (global) for block-1 present (mecanismo).
+        future_2     : Real node indices (global) for block-2 future.
+        present_2    : Real node indices (global) for block-2 present.
+        dist_original: Marginal distribution vector of size N (P(node=1)).
+
+    Returns:
+        float: Marginal L1 EMD loss between dist_original and the reconstructed
+               joint distribution obtained from the two independent blocks.
+    """
+    n = len(dist_original)
+    dist_rec = np.empty(n, dtype=np.float32)
+
+    for future_side, present_side in ((future_1, present_1), (future_2, present_2)):
+        if not future_side:
+            continue
+        fa = np.array(future_side,  dtype=np.int8)
+        pa = np.array(present_side, dtype=np.int8) if present_side else np.array([], dtype=np.int8)
+        sub = subsistema.bipartir(fa, pa)
+        dist_sub = sub.distribucion_marginal()
+        for idx in future_side:
+            pos = np.where(subsistema.indices_ncubos == idx)[0]
+            if pos.size:
+                dist_rec[pos[0]] = dist_sub[pos[0]]
+
+    return float(np.sum(np.abs(dist_original - dist_rec)))
+
 
 def _serializar_particion(
     particion: Tuple[List[int], ...],
@@ -318,53 +374,118 @@ def _serializar_particion(
     return {"partes": partes}
 
 def _construir_matriz_afinidad_desde_tabla(
-    tabla_transiciones: dict,
+    tabla_T: np.ndarray,
     n_vars: int,
-    estado_inicial_lista: list,
 ) -> np.ndarray:
     """
-    Construye la matriz de afinidad NxN entre n-cubos a partir de los costos
-    acumulados en la tabla de transiciones del hipercubo.
+    Build the N×N affinity matrix from the full cost table tabla_T.
 
-    Metodología:
-    - Cada transición (estado_inicial → estado_s) produce un vector de costos
-      de longitud N, uno por n-cubo.  Esos vectores forman la matriz de
-      "perfiles de costo": C[s, i] = costo del n-cubo i en la transición s.
-    - La afinidad entre n-cubo i y n-cubo j es la similitud coseno de sus
-      columnas en C: variables que responden igual al hipercubo están unidas.
-    - Se normaliza al rango [0, 1] desplazando la similitud coseno (∈[-1,1]).
+    Uses all 2^N rows of tabla_T so the column profiles of each variable
+    capture its cost behaviour across the entire hypercube.
+
+    Methodology:
+    - C = tabla_T, shape (2^N, N).  Column x is variable x's cost profile.
+    - Affinity A[i,j] = (1 + cosine_similarity(col_i, col_j)) / 2 ∈ [0, 1].
+    - Variables that respond similarly to hypercube transitions cluster together.
 
     Args:
-        tabla_transiciones: dict {(tuple_ini, tuple_fin): [c0, c1, ..., cN-1]}.
-        n_vars            : Número de n-cubos del subsistema.
-        estado_inicial_lista: Estado inicial como lista de enteros.
+        tabla_T: Full cost table of shape (2**N, N) in float32.
+        n_vars : Number of n-cubes (N); must equal tabla_T.shape[1].
 
     Returns:
-        Matriz numpy de forma (n_vars, n_vars), dtype float64.
+        Affinity matrix of shape (n_vars, n_vars) in float64.
     """
-    ini_tuple = tuple(estado_inicial_lista)
+    C = tabla_T.astype(np.float64)  # (2^N, N)
 
-    # Recopilar vectores de costo de todas las transiciones desde estado_inicial
-    vectores: list = []
-    for (t_ini, t_fin), costos in tabla_transiciones.items():
-        if t_ini == ini_tuple and t_fin != ini_tuple:
-            vectores.append(costos)
-
-    if not vectores:
-        return np.ones((n_vars, n_vars), dtype=np.float64)
-
-    C = np.array(vectores, dtype=np.float64)  # (n_estados, n_vars)
-
-    # Similitud coseno entre columnas (perfiles de cada n-cubo)
-    norms = np.linalg.norm(C, axis=0, keepdims=True)
+    norms = np.linalg.norm(C, axis=0, keepdims=True)  # (1, N)
     norms = np.where(norms < 1e-12, 1.0, norms)
-    C_norm = C / norms
+    C_norm = C / norms  # (2^N, N)
 
-    A = C_norm.T @ C_norm          # (n_vars, n_vars), valores en [-1, 1]
-    A = (A + 1.0) / 2.0            # normalizar a [0, 1]
+    A = C_norm.T @ C_norm   # (N, N), values in [-1, 1]
+    A = (A + 1.0) / 2.0     # normalise to [0, 1]
     np.fill_diagonal(A, 1.0)
 
     return A.astype(np.float64)
+
+
+def _coste_simetrico_estados(tabla_T: np.ndarray, full_mask: int) -> np.ndarray:
+    """
+    Per-state symmetric cost of the whole hypercube in one vectorised pass.
+
+    For every state j the cost is sum_x min(tabla_T[j, x], tabla_T[j^mask, x]):
+    each output variable contributes its cheaper side (j or its bit-complement).
+    Returns a (2^n_dims,) float64 vector aligned with tabla_T's row index.
+    """
+    indices = np.arange(len(tabla_T), dtype=np.int64)
+    complemento = indices ^ full_mask
+    return np.minimum(tabla_T, tabla_T[complemento]).sum(axis=1, dtype=np.float64)
+
+
+def _generar_candidatos_hipercubo_completo(
+    tabla_T: np.ndarray,
+    dist: np.ndarray,
+    idx_origen: int,
+    full_mask: int,
+    n: int,
+    chunk_size: int = COST_TABLE_CHUNK_ROWS,
+) -> "List[Tuple[List[int], List[int]]]":
+    """
+    Derive geometric bipartition candidates directly from the cost table.
+
+    The whole-table symmetric cost is computed once (vectorised), then for each
+    Hamming shell d = 1..n_dims//2+1 the single cheapest representative state is
+    taken and split into a (present, effect) bipartition by comparing, variable
+    by variable, its cost against the bit-complement.
+
+    Selection is a plain per-shell minimum over the precomputed cost vector — no
+    intermediate ordering of the shell is needed because only the minimiser is
+    used. Duplicate bipartitions across shells are dropped.
+
+    Args:
+        tabla_T   : (2^n_dims, n) float32 cost table.
+        dist      : (2^n_dims,) Hamming distances to the origin.
+        idx_origen: Integer index of the origin state (kept for signature
+                    compatibility; the symmetric cost already encodes it).
+        full_mask : (1 << n_dims) - 1, addresses the bit complement.
+        n         : Number of output variables (n-cubes).
+        chunk_size: Unused; kept for backward-compatible call sites.
+
+    Returns:
+        List of (present_part, effect_part) tuples, each a bipartition of {0..n-1}.
+    """
+    n_dims = len(tabla_T).bit_length() - 1
+    coste = _coste_simetrico_estados(tabla_T, full_mask)
+
+    candidatos: list = []
+    vistos: set = set()
+
+    for d in range(1, n_dims // 2 + 2):
+        shell = np.flatnonzero(dist == d)
+        if shell.size == 0:
+            continue
+
+        # Representante del nivel: el estado de menor coste geométrico.
+        j_star = int(shell[np.argmin(coste[shell])])
+
+        fila = tabla_T[j_star]
+        fila_complemento = tabla_T[j_star ^ full_mask]
+
+        # Cada variable cae del lado "efecto" si su coste no es mayor en j_star
+        # que en el complemento; las demás forman el lado "presente".
+        lado_efecto = fila <= fila_complemento
+        efectos = np.flatnonzero(lado_efecto[:n]).tolist()
+        presentes = np.flatnonzero(~lado_efecto[:n]).tolist()
+
+        if not efectos or not presentes:
+            continue
+
+        firma = (tuple(efectos), tuple(presentes))
+        if firma in vistos:
+            continue
+        vistos.add(firma)
+        candidatos.append((presentes, efectos))
+
+    return candidatos
 
 
 def _particion_grafo_hipercubo(
@@ -557,40 +678,66 @@ def _evaluar_k_completo(
     matriz_afinidad: Optional[np.ndarray] = None,
     permitir_presente_vacio: bool = PERMITIR_PRESENTE_VACIO_POR_DEFECTO,
     tiempo_maximo_segundos: Optional[float] = None,
+    tabla_T: Optional[np.ndarray] = None,
+    dist_array: Optional[np.ndarray] = None,
+    idx_origen: int = 0,
+    full_mask: int = 0,
+    candidatos_asimetricos: Optional[List[Tuple[List[int], List[int]]]] = None,
 ) -> dict:
     """
-    Evalúa un valor específico de k usando heurísticas geométricas e ILS.
+    Evaluate a specific k value using geometric heuristics and ILS.
 
     Pipeline:
-      1. SpectralClustering + AgglomerativeClustering (múltiples semillas/linkage).
-      2. Candidatos de aislamiento: k-1 nodos aislados + clúster residual.
-      3. Variantes con mecanismo vacío (∅) si está habilitado.
-      4. Evaluación EMD en paralelo sobre todos los candidatos.
-      5. Refinamiento local 1-move sobre el mejor candidato.
-      6. Búsqueda Local Iterada (ILS): perturbación + re-refinamiento × N_ILS.
+      1. SpectralClustering + AgglomerativeClustering (multiple seeds/linkage).
+      2. For k=2: symmetric geometric candidates from the full tabla_T (if provided).
+      3. Isolation candidates: k-1 isolated nodes + residual cluster.
+      4. Variants with empty mechanism (∅) if enabled.
+      5. Parallel EMD evaluation over all candidates.
+      6. Local 1-move refinement on the best candidate.
+      7. Iterated Local Search (ILS): perturbation + re-refinement × N_ILS.
+      8. For k=2: asymmetric candidates from tabla_T (evaluar_corte_asimetrico).
+         Checked after the full symmetric pipeline; update best if lower Phi found.
 
     Args:
-        k               : Número de partes a evaluar.
-        subsistema      : System ya condicionado/substradido (serializable).
-        indices_ncubos  : Índices de los n-cubos del subsistema.
-        dims_ncubos     : Dimensiones de los n-cubos.
-        dists_marginales: Distribución marginal del subsistema.
-        n_vars          : Número de variables del subsistema.
-        n_jobs_internos : Hilos disponibles para joblib dentro de este proceso.
-        matriz_afinidad : Matriz NxN de afinidad geométrica (opcional).
+        k                     : Number of parts to evaluate.
+        subsistema            : Conditioned/substracted System (serialisable).
+        indices_ncubos        : Indices of the subsystem n-cubes.
+        dims_ncubos           : Dimensions of the subsystem n-cubes.
+        dists_marginales      : Marginal distribution of the subsystem.
+        n_vars                : Number of variables in the subsystem.
+        n_jobs_internos       : Threads available for joblib inside this process.
+        matriz_afinidad       : N×N geometric affinity matrix (optional).
+        tabla_T               : Full (2^n_dims, n) cost table (optional).
+        dist_array            : (2^n_dims,) Hamming distances to origin (with tabla_T).
+        idx_origen            : Integer index of the origin state.
+        full_mask             : (1 << n_dims) - 1 bit mask.
+        candidatos_asimetricos: List of (future_real_indices, present_real_indices)
+                                asymmetric cut candidates generated by
+                                KGeoMIP._candidatos_desde_tabla_T(). Only used for k=2.
 
     Returns:
-        dict con claves: k, perdida, particion, particion_grafica, error.
+        dict with keys: k, perdida, particion, particion_grafica, error, asimetrico.
+        The 'asimetrico' key is None unless an asymmetric cut beat the symmetric
+        pipeline; when set it holds (future_1, present_1, future_2, present_2) with
+        real node indices, allowing the caller to reconstruct Phi correctly.
     """
     N_ILS = 4  # reinicios de búsqueda local iterada
 
     try:
-        # ── Fase 1: generación de candidatos ─────────────────────────────────
+        # ── Phase 1: candidate generation ────────────────────────────────────
         candidatos_geo: list = []
         if matriz_afinidad is not None:
             candidatos_geo = _particion_grafo_hipercubo(
                 matriz_afinidad, k, n_candidatos=6
             )
+
+        # Geometric candidates from the full tabla_T (k=2 only)
+        if k == 2 and tabla_T is not None and dist_array is not None:
+            for c_geo in _generar_candidatos_hipercubo_completo(
+                tabla_T, dist_array, idx_origen, full_mask, n_vars
+            ):
+                if c_geo not in candidatos_geo:
+                    candidatos_geo.append(c_geo)
 
         for c_ais in _generar_candidatos_aislamiento(n_vars, k):
             if c_ais not in candidatos_geo:
@@ -698,6 +845,40 @@ def _evaluar_k_completo(
                     mejor_perdida = perdida_ils
                     mejor_particion = particion_ils
 
+        # ── Phase 5: asymmetric candidates from tabla_T (k=2 only) ──────────
+        # Evaluated AFTER the full symmetric pipeline so that the symmetric
+        # pipeline always provides a valid lower bound.  If any asymmetric cut
+        # beats it, we record the cut and update mejor_perdida.  The result dict
+        # carries the raw (f1, p1, f2, p2) real-index cut so the caller can
+        # reconstruct Phi correctly (present sets differ from symmetric intersect).
+        mejor_asimetrico: Optional[Tuple] = None
+        if k == 2 and candidatos_asimetricos:
+            for future_side, present_side in candidatos_asimetricos:
+                future_other  = [int(x) for x in indices_ncubos if x not in set(future_side)]
+                present_other = [int(x) for x in dims_ncubos   if x not in set(present_side)]
+                if not future_side or not future_other:
+                    continue
+                perdida_asim = evaluar_corte_asimetrico(
+                    subsistema,
+                    future_side,  present_side,
+                    future_other, present_other,
+                    dists_marginales,
+                )
+                if perdida_asim + 1e-12 < mejor_perdida:
+                    mejor_perdida = perdida_asim
+                    mejor_asimetrico = (future_side, present_side,
+                                        future_other, present_other)
+                    # Convert future split to position format for display/refinement
+                    pos_1 = sorted(
+                        int(np.where(indices_ncubos == idx)[0][0])
+                        for idx in future_side
+                    )
+                    pos_2 = sorted(
+                        int(np.where(indices_ncubos == idx)[0][0])
+                        for idx in future_other
+                    )
+                    mejor_particion = (pos_1, pos_2)
+
         fmt_pk = fmt_k_particion(mejor_particion, indices_ncubos, dims_ncubos)
         return {
             "k": k,
@@ -705,6 +886,7 @@ def _evaluar_k_completo(
             "particion": mejor_particion,
             "particion_grafica": fmt_pk,
             "error": None,
+            "asimetrico": mejor_asimetrico,
         }
 
     except Exception as e:
@@ -714,7 +896,381 @@ def _evaluar_k_completo(
             "particion": None,
             "particion_grafica": "",
             "error": str(e),
+            "asimetrico": None,
         }
+
+
+# ── Estrategia greedy top-down (enfoque 20263) ────────────────────────────
+
+
+def _construir_cut_pool(
+    tabla_T: np.ndarray,
+    dist_array: np.ndarray,
+    idx_origen: int,
+    n_dims: int,
+    indices_ncubos: np.ndarray,
+    dims_ncubos: np.ndarray,
+) -> "list[Block]":
+    """
+    Build the cut pool from the cost table.
+
+    Three families of candidates:
+    1. N symmetric isolation cuts ({i}, {present_i}) + complements.
+    2. N empty-mechanism isolation cuts ({i}, ∅): isolates future node i with
+       NO present mechanism, identical to 20263's single-bit-flip candidates.
+       When applied to a block B, yields inside=({i}, ∅) and outside=(B−{i}, B.pre).
+    3. Best geometric cut per Hamming level d=1..n_dims//2+1 + complements.
+
+    All entries are (frozenset of global future indices,
+                     frozenset of global present indices).
+    """
+    n = len(indices_ncubos)
+    full_mask = (1 << n_dims) - 1
+    pool: list = []
+    seen: set = set()
+
+    all_eff = frozenset(int(x) for x in indices_ncubos)
+    all_pre = frozenset(int(x) for x in dims_ncubos)
+
+    def _add(eff: frozenset, pre: frozenset) -> None:
+        if not eff:
+            return
+        key = (eff, pre)
+        if key not in seen:
+            seen.add(key)
+            pool.append((eff, pre))
+
+    for i in range(n):
+        eff = frozenset([int(indices_ncubos[i])])
+        pre = frozenset([int(dims_ncubos[i])]) if i < len(dims_ncubos) else frozenset()
+        _add(eff, pre)
+        _add(all_eff - eff, all_pre - pre)
+        # Corte de aislamiento vacío: nodo i sin ningún mecanismo presente.
+        # Cuando se aplica a bloque B: inside=({i}, ∅), outside=(B−{i}, B.pre).
+        # Equivalente al candidato single-bit de 20263.
+        _add(eff, frozenset())
+
+    all_states = np.arange(len(tabla_T), dtype=np.int32)
+    for d in range(1, n_dims // 2 + 2):
+        mask_d = dist_array == d
+        estados_nivel = all_states[mask_d]
+        if len(estados_nivel) == 0:
+            continue
+
+        best_cost = np.inf
+        best_j = -1
+        for start in range(0, len(estados_nivel), COST_TABLE_CHUNK_ROWS):
+            chunk = estados_nivel[start : start + COST_TABLE_CHUNK_ROWS]
+            costs = np.minimum(tabla_T[chunk], tabla_T[chunk ^ full_mask]).sum(axis=1)
+            idx_local = int(np.argmin(costs))
+            if float(costs[idx_local]) < best_cost:
+                best_cost = float(costs[idx_local])
+                best_j = int(chunk[idx_local])
+
+        if best_j < 0:
+            continue
+
+        flipped = best_j ^ idx_origen
+        present_pos = [b for b in range(n_dims) if not (flipped >> b) & 1]
+        row_j = tabla_T[best_j]
+        row_c = tabla_T[best_j ^ full_mask]
+        effects_pos = [b for b in range(n) if row_j[b] <= row_c[b]]
+
+        eff = frozenset(int(indices_ncubos[p]) for p in effects_pos)
+        pre = frozenset(int(dims_ncubos[p]) for p in present_pos if p < len(dims_ncubos))
+        _add(eff, pre)
+        _add(all_eff - eff, all_pre - pre)
+
+    return pool
+
+
+def evaluar_bloques(
+    subsistema,
+    bloques: "list[Block]",
+    dist_original: np.ndarray,
+) -> float:
+    """
+    Marginal L1 EMD loss for an asymmetric k-partition given as Block list.
+
+    Uses System.particionar() to process all cubes in a single pass, equivalent
+    to 20263's k_partition_marginal_distribution. Each cube is marginalized to
+    keep only the mechanism dims of its own block, so future and present sets
+    are independent across blocks (no symmetric intersection forced).
+
+    Args:
+        subsistema   : Conditioned subsystem with particionar() support.
+        bloques      : List of (frozenset global futures, frozenset global presents).
+        dist_original: Marginal distribution vector of size N.
+
+    Returns:
+        float: Sum of marginal L1 differences.
+    """
+    particiones = [
+        (
+            np.array(sorted(future_set), dtype=np.int8),
+            np.array(sorted(present_set), dtype=np.int8)
+            if present_set
+            else np.array([], dtype=np.int8),
+        )
+        for future_set, present_set in bloques
+        if future_set
+    ]
+    if not particiones:
+        return float(np.sum(np.abs(dist_original)))
+
+    dist_rec = subsistema.particionar(particiones).distribucion_marginal()
+    return float(np.sum(np.abs(dist_original - dist_rec)))
+
+
+def _mejor_split_bloques(
+    subsistema,
+    dist_original: np.ndarray,
+    bloques: "list[Block]",
+    cut_pool: "list[Block]",
+    n_jobs: int = 1,
+) -> "Optional[tuple[float, list]]":
+    """
+    Find the best single block split over all (block, cut) combinations.
+
+    For each current block b and each candidate cut c computes:
+        inside  = (b.future ∩ c.future, b.present ∩ c.present)
+        outside = (b.future − c.future, b.present − c.present)
+    and evaluates EMD for the resulting configuration.
+
+    Returns None if no valid split exists.
+    """
+    configs: list = []
+    for position, (eff_block, pre_block) in enumerate(bloques):
+        if len(eff_block) + len(pre_block) < 2:
+            continue
+        for cut_eff, cut_pre in cut_pool:
+            inside: Block = (eff_block & cut_eff, pre_block & cut_pre)
+            outside: Block = (eff_block - cut_eff, pre_block - cut_pre)
+            if not (inside[0] or inside[1]) or not (outside[0] or outside[1]):
+                continue
+            configs.append(bloques[:position] + [inside, outside] + bloques[position + 1:])
+
+    if not configs:
+        return None
+
+    if n_jobs > 1 and len(configs) > 1:
+        losses = Parallel(n_jobs=min(len(configs), n_jobs), prefer="threads")(
+            delayed(evaluar_bloques)(subsistema, cfg, dist_original)
+            for cfg in configs
+        )
+    else:
+        losses = [evaluar_bloques(subsistema, cfg, dist_original) for cfg in configs]
+
+    best_idx = int(np.argmin(losses))
+    return float(losses[best_idx]), configs[best_idx]
+
+
+def _greedy_k_particion(
+    subsistema,
+    dist_original: np.ndarray,
+    cut_pool: "list[Block]",
+    k: int,
+    n_jobs: int = N_JOBS_INTERNOS,
+) -> "tuple[float, list[Block]]":
+    """
+    Top-down greedy k-partition: start with one block covering the full
+    subsystem, then perform k-1 best splits using the shared cut pool.
+
+    At each step the split that minimises total EMD loss is chosen.
+    The cut pool is fixed and shared across all k values (built once).
+
+    Args:
+        subsistema   : Conditioned subsystem.
+        dist_original: Marginal distribution vector.
+        cut_pool     : Pre-built list of (future_set, present_set) Block candidates.
+        k            : Target number of blocks.
+        n_jobs       : Threads for parallel candidate evaluation.
+
+    Returns:
+        (loss, list of Block) for the best k-partition found.
+    """
+    future_universe: frozenset = frozenset(int(x) for x in subsistema.indices_ncubos)
+    present_universe: frozenset = frozenset(int(x) for x in subsistema.dims_ncubos)
+    bloques: list = [(future_universe, present_universe)]
+
+    while len(bloques) < k:
+        result = _mejor_split_bloques(subsistema, dist_original, bloques, cut_pool, n_jobs)
+        if result is None:
+            break
+        _, bloques = result
+
+    loss = evaluar_bloques(subsistema, bloques, dist_original)
+    return loss, bloques
+
+
+# ── Refinamiento 1-move e ILS sobre bloques asimétricos (AYDA) ───────────
+
+N_ILS: int = 4  # Iteraciones de Búsqueda Local Iterada, documentadas en AYDA
+
+
+def _refinar_bloques_1move(
+    subsistema,
+    dist_original: np.ndarray,
+    bloques: "list[Block]",
+    n_jobs: int = 1,
+) -> "tuple[float, list[Block]]":
+    """
+    Refinamiento 1-move sobre listas de bloques asimétricos (fases 3/4 de AYDA).
+
+    Explora dos tipos de movimientos, el segundo exclusivo de AYDA gracias a
+    la representación asimétrica Block=(future_set, present_set):
+
+      - Movimiento futuro: traslada un nodo futuro del bloque i al bloque j
+        (equivalente conceptual al 1-move en particiones simétricas).
+      - Movimiento presente (AYDA único): traslada un nodo del lado presente
+        del bloque i al bloque j SIN mover su par futuro. Solo es posible
+        porque en AYDA los lados futuro y presente se particionan de forma
+        independiente, a diferencia de los cortes simétricos de 20263.
+
+    Itera hasta convergencia local (ningún movimiento mejora la pérdida EMD).
+
+    Args:
+        subsistema   : Subsistema condicionado con soporte para particionar().
+        dist_original: Vector de distribución marginal original.
+        bloques      : Lista de Block = (frozenset futuros, frozenset presentes).
+        n_jobs       : Hilos para evaluación paralela con joblib.
+
+    Returns:
+        (perdida, bloques_refinados): Mejor pérdida y configuración encontrada.
+    """
+    mejor_perdida = evaluar_bloques(subsistema, bloques, dist_original)
+    mejor_bloques: "list[Block]" = list(bloques)
+    mejoro = True
+
+    while mejoro:
+        mejoro = False
+        k = len(mejor_bloques)
+        vecinos: "list[list[Block]]" = []
+
+        # ── Movimientos futuros ────────────────────────────────────────────
+        for i, (eff_i, pre_i) in enumerate(mejor_bloques):
+            if len(eff_i) <= 1:
+                continue  # no vaciar el conjunto futuro del bloque
+            for node in eff_i:
+                for j in range(k):
+                    if i == j:
+                        continue
+                    eff_j, pre_j = mejor_bloques[j]
+                    cfg = list(mejor_bloques)
+                    cfg[i] = (eff_i - {node}, pre_i)
+                    cfg[j] = (eff_j | {node}, pre_j)
+                    vecinos.append(cfg)
+
+        # ── Movimientos presentes (exclusivo AYDA) ─────────────────────────
+        # Mueve un nodo del lado presente de i al lado presente de j,
+        # sin afectar la asignación futura de ese nodo. Explora el espacio
+        # asimétrico imposible en representaciones simétricas como 20263.
+        for i, (eff_i, pre_i) in enumerate(mejor_bloques):
+            for node in pre_i:
+                for j in range(k):
+                    if i == j:
+                        continue
+                    eff_j, pre_j = mejor_bloques[j]
+                    cfg = list(mejor_bloques)
+                    cfg[i] = (eff_i, pre_i - {node})
+                    cfg[j] = (eff_j, pre_j | {node})
+                    vecinos.append(cfg)
+
+        if not vecinos:
+            break
+
+        if n_jobs > 1 and len(vecinos) > 1:
+            perdidas = Parallel(
+                n_jobs=min(len(vecinos), n_jobs), prefer="threads"
+            )(delayed(evaluar_bloques)(subsistema, cfg, dist_original) for cfg in vecinos)
+        else:
+            perdidas = [evaluar_bloques(subsistema, cfg, dist_original) for cfg in vecinos]
+
+        idx_mejor = int(np.argmin(perdidas))
+        if float(perdidas[idx_mejor]) < mejor_perdida - 1e-9:
+            mejor_perdida = float(perdidas[idx_mejor])
+            mejor_bloques = vecinos[idx_mejor]
+            mejoro = True
+
+    return mejor_perdida, mejor_bloques
+
+
+def _perturbar_bloques(
+    bloques: "list[Block]",
+    n_movimientos: int = 2,
+    semilla: int = 42,
+) -> "list[Block]":
+    """
+    Perturba una lista de bloques para escapar de mínimos locales (ILS de AYDA).
+
+    Alterna aleatoriamente entre movimientos futuros y presentes, garantizando
+    que ningún bloque futuro quede vacío. El movimiento presente asimétrico es
+    exclusivo de AYDA y no tiene equivalente en 20263.
+
+    Args:
+        bloques      : Lista de Block = (frozenset futuros, frozenset presentes).
+        n_movimientos: Número de nodos a reubicar en la perturbación.
+        semilla      : Semilla para reproducibilidad entre iteraciones ILS.
+
+    Returns:
+        Nueva lista de Block perturbada.
+    """
+    rng = _random_module.Random(semilla)
+    result: "list[Block]" = [(frozenset(eff), frozenset(pre)) for eff, pre in bloques]
+    k = len(result)
+
+    for _ in range(n_movimientos):
+        tipo = rng.randint(0, 1)
+
+        if tipo == 0:  # movimiento futuro
+            candidatos = [i for i, (eff, _) in enumerate(result) if len(eff) > 1]
+            if not candidatos:
+                continue
+            i = rng.choice(candidatos)
+            eff_i, pre_i = result[i]
+            node = rng.choice(sorted(eff_i))
+            j = rng.choice([x for x in range(k) if x != i])
+            eff_j, pre_j = result[j]
+            result[i] = (eff_i - {node}, pre_i)
+            result[j] = (eff_j | {node}, pre_j)
+        else:  # movimiento presente (AYDA asimétrico)
+            candidatos = [i for i, (_, pre) in enumerate(result) if len(pre) > 0]
+            if not candidatos:
+                continue
+            i = rng.choice(candidatos)
+            eff_i, pre_i = result[i]
+            node = rng.choice(sorted(pre_i))
+            j = rng.choice([x for x in range(k) if x != i])
+            eff_j, pre_j = result[j]
+            result[i] = (eff_i, pre_i - {node})
+            result[j] = (eff_j, pre_j | {node})
+
+    return result
+
+
+def fmt_bloques(
+    bloques: "list[Block]",
+    indices_ncubos: np.ndarray,
+    dims_ncubos: np.ndarray,
+) -> str:
+    """
+    Format a Block list as a two-line partition string.
+
+    Upper line (UPPERCASE) = future nodes (t+1) per block.
+    Lower line (lowercase) = present nodes (t) per block; ∅ if empty.
+    """
+    mec_set = set(int(x) for x in dims_ncubos)
+    partes_fmt = []
+    for future_set, present_set in bloques:
+        futuros = sorted(future_set)
+        str_fut = ",".join(ABECEDARY[i] for i in futuros) if futuros else VOID_STR
+        presentes = sorted(p for p in present_set if p in mec_set)
+        str_pres = ",".join(LOWER_ABECEDARY[i] for i in presentes) if presentes else VOID_STR
+        ancho = max(len(str_fut), len(str_pres)) + 2
+        partes_fmt.append((f"|{str_fut:^{ancho}}|", f"|{str_pres:^{ancho}}|"))
+    linea_top = "".join(t for t, _ in partes_fmt)
+    linea_bot = "".join(b for _, b in partes_fmt)
+    return f"{linea_top}\n{linea_bot}"
 
 
 # ── Clase principal ────────────────────────────────────────────────────────
@@ -795,101 +1351,113 @@ class KGeoMIP(SIA):
 
         # ── Caso trivial ───────────────────────────────────────────────────
         if n_vars <= 1:
-            particion_optima = tuple([i] for i in range(n_vars))
-            k_optimo = n_vars
+            future_universe: frozenset = frozenset(
+                int(x) for x in self.sia_subsistema.indices_ncubos
+            )
+            present_universe: frozenset = frozenset(
+                int(x) for x in self.sia_subsistema.dims_ncubos
+            )
+            bloques_optimos: list = [(future_universe, present_universe)]
+            k_optimo = 1
             mejor_perdida = 0.0
             dist_reconstruida = self.sia_dists_marginales.copy()
 
         else:
             self._construir_tabla_costos()
-            # ── Determinar estrategia de paralelización ──────────────────────
-            if k is not None:
-                # ═══════════════════════════════════════════════════════════
-                # MODO ÚNICO K: Sin ProcessPoolExecutor, máxima capacidad
-                # ═══════════════════════════════════════════════════════════
-                n_jobs_internos = max(1, multiprocessing.cpu_count() - 1)
-                self.logger.critic(
-                    f"🎯 MODO K ÚNICO (K={k}): Usando {n_jobs_internos} núcleos "
-                    f"para búsqueda exhaustiva/jerárquica."
-                )
+            cut_pool = _construir_cut_pool(
+                self.tabla_T,
+                self._dist_array,
+                self._idx_origen,
+                self._n_dims,
+                self.sia_subsistema.indices_ncubos,
+                self.sia_subsistema.dims_ncubos,
+            )
+            self.logger.critic(f"Cut pool: {len(cut_pool)} candidatos.")
 
+            valores_k = (
+                [k] if k is not None
+                else list(range(2, min(6, n_vars + 1)))
+            )
+            self.logger.critic(
+                f"Evaluando K={valores_k} con estrategia greedy top-down."
+            )
+
+            resultados_k: list = []
+            for test_k in valores_k:
                 try:
-                    resultado = _evaluar_k_completo(
-                        k,
+                    perdida_k, bloques_k = _greedy_k_particion(
                         self.sia_subsistema,
+                        self.sia_dists_marginales,
+                        cut_pool,
+                        test_k,
+                    )
+                    self.logger.critic(
+                        f"  Greedy K={test_k} → pérdida={perdida_k:.6f}"
+                    )
+
+                    # ── Fase 3: refinamiento 1-move (documentado AYDA, ausente en 20263) ──
+                    # Incluye movimientos presentes asimétricos: mueve un nodo del
+                    # lado presente sin tocar su par futuro, imposible en 20263.
+                    perdida_k, bloques_k = _refinar_bloques_1move(
+                        self.sia_subsistema,
+                        self.sia_dists_marginales,
+                        bloques_k,
+                        n_jobs=N_JOBS_INTERNOS,
+                    )
+                    self.logger.critic(
+                        f"  +1-move K={test_k} perdida={perdida_k:.6f}"
+                    )
+
+                    # ── Fase 4: ILS — N_ILS iteraciones de perturb+refine ──────────────
+                    # Escapa de mínimos locales del 1-move; documentado en AYDA,
+                    # ausente en 20263.
+                    for ils_iter in range(N_ILS):
+                        bloques_pert = _perturbar_bloques(
+                            bloques_k,
+                            n_movimientos=max(1, n_vars // 3),
+                            semilla=42 + ils_iter * 17 + test_k,
+                        )
+                        p_ils, b_ils = _refinar_bloques_1move(
+                            self.sia_subsistema,
+                            self.sia_dists_marginales,
+                            bloques_pert,
+                            n_jobs=N_JOBS_INTERNOS,
+                        )
+                        if p_ils < perdida_k - 1e-9:
+                            perdida_k = p_ils
+                            bloques_k = b_ils
+                            self.logger.critic(
+                                f"  +ILS iter {ils_iter+1} K={test_k} "
+                                f"mejora={perdida_k:.6f}"
+                            )
+
+                    fmt_pk = fmt_bloques(
+                        bloques_k,
                         self.sia_subsistema.indices_ncubos,
                         self.sia_subsistema.dims_ncubos,
-                        self.sia_dists_marginales,
-                        len(self.sia_subsistema.indices_ncubos),
-                        n_jobs_internos,
-                        self._matriz_afinidad,
-                        permitir_presente_vacio=permitir_presente_vacio,
-                        tiempo_maximo_segundos=tiempo_maximo_segundos,
                     )
-                    if resultado["error"]:
-                        self.logger.critic(f"  ✗ K={k} falló: {resultado['error']}")
-                        raise RuntimeError(f"Error al evaluar K={k}: {resultado['error']}")
-                    else:
-                        self.logger.critic(
-                            f"  ✓ K={k} completado → pérdida={resultado['perdida']:.6f}"
-                        )
-
-                    resultados_k = [resultado]
+                    self.logger.critic(f"  ✓ K={test_k} → pérdida final={perdida_k:.6f}")
+                    resultados_k.append({
+                        "k": test_k,
+                        "perdida": perdida_k,
+                        "bloques": bloques_k,
+                        "particion_grafica": fmt_pk,
+                        "error": None,
+                    })
                 except Exception as exc:
-                    self.logger.critic(f"  ✗ K={k} excepción: {exc}")
-                    raise RuntimeError(f"Excepción al evaluar K={k}: {exc}")
+                    self.logger.critic(f"  ✗ K={test_k} excepción: {exc}")
+                    resultados_k.append({
+                        "k": test_k,
+                        "perdida": float("inf"),
+                        "bloques": None,
+                        "particion_grafica": "",
+                        "error": str(exc),
+                    })
 
-            else:
-                # ═══════════════════════════════════════════════════════════
-                # MODO MÚLTIPLE K: Evaluación secuencial k=2..N
-                # Cada k usa todos los núcleos (N_JOBS_INTERNOS = cpu_count-1)
-                # para maximizar recursos en una sola tarea a la vez.
-                # ═══════════════════════════════════════════════════════════
-                n_jobs_internos = N_JOBS_INTERNOS
-                valores_k = list(range(2, min(6, len(self.sia_subsistema.indices_ncubos) + 1)))
-
-                self.logger.critic(
-                    f"🔁 MODO MÚLTIPLE K: Evaluación secuencial k={valores_k[0]}..{valores_k[-1]} "
-                    f"con {n_jobs_internos} núcleos por k."
-                )
-
-                resultados_k: List[dict] = []
-                for test_k in valores_k:
-                    self.logger.critic(f"  → Evaluando K={test_k}...")
-                    try:
-                        resultado = _evaluar_k_completo(
-                            test_k,
-                            self.sia_subsistema,
-                            self.sia_subsistema.indices_ncubos,
-                            self.sia_subsistema.dims_ncubos,
-                            self.sia_dists_marginales,
-                            len(self.sia_subsistema.indices_ncubos),
-                            n_jobs_internos,
-                            self._matriz_afinidad,
-                            permitir_presente_vacio,
-                            tiempo_maximo_segundos,
-                        )
-                        if resultado["error"]:
-                            self.logger.critic(f"  ✗ K={test_k} falló: {resultado['error']}")
-                        else:
-                            self.logger.critic(
-                                f"  ✓ K={test_k} completado → pérdida={resultado['perdida']:.6f}"
-                            )
-                        resultados_k.append(resultado)
-                    except Exception as exc:
-                        self.logger.critic(f"  ✗ K={test_k} excepción: {exc}")
-                        resultados_k.append({
-                            "k": test_k,
-                            "perdida": float("inf"),
-                            "particion": None,
-                            "particion_grafica": "",
-                            "error": str(exc),
-                        })
-            # ── Registrar histórico y elegir el mejor ──────────────────────
             self.historico_particiones = []
             mejor_perdida = float("inf")
-            particion_optima = None
-            k_optimo = None  # se asigna solo cuando realmente se encuentra un resultado válido
+            bloques_optimos = None
+            k_optimo = None
 
             for res in sorted(resultados_k, key=lambda r: r["k"]):
                 self.historico_particiones.append({
@@ -897,48 +1465,39 @@ class KGeoMIP(SIA):
                     "perdida": res["perdida"],
                     "particion_grafica": res["particion_grafica"],
                 })
-                if res["perdida"] < mejor_perdida and res["particion"] is not None:
+                if res["perdida"] < mejor_perdida and res["bloques"] is not None:
                     mejor_perdida = res["perdida"]
-                    particion_optima = res["particion"]
+                    bloques_optimos = res["bloques"]
                     k_optimo = res["k"]
 
-            if particion_optima is None:
+            if bloques_optimos is None:
                 raise RuntimeError(
-                    "Todos los valores de k fallaron. "
-                    "Revisa los logs para ver el motivo."
+                    "Todos los valores de k fallaron. Revisa los logs."
                 )
 
-            # ── Reconstruir distribución para Solution ─────────────────────
-            dist_reconstruida = np.empty(
-                len(self.sia_dists_marginales), dtype=np.float32
-            )
-            for parte in particion_optima:
-                if not parte:
+            # Reconstruct marginal distribution from winning partition
+            indices = self.sia_subsistema.indices_ncubos
+            dist_reconstruida = np.empty(len(self.sia_dists_marginales), dtype=np.float32)
+            for future_set, present_set in bloques_optimos:
+                if not future_set:
                     continue
-                # Centinela -1 → mecanismo vacío (∅) para esta parte
-                if parte[0] == -1:
-                    parte_real = parte[1:]
-                    presentes = np.array([], dtype=np.int8)
-                else:
-                    parte_real = parte
-                    futuros_tmp = self.sia_subsistema.indices_ncubos[
-                        np.array(parte_real, dtype=np.int8)
-                    ]
-                    presentes = np.intersect1d(futuros_tmp, self.sia_subsistema.dims_ncubos)
-                if not parte_real:
-                    continue
-                futuros = self.sia_subsistema.indices_ncubos[
-                    np.array(parte_real, dtype=np.int8)
-                ]
+                futuros = np.array(sorted(future_set), dtype=np.int8)
+                presentes = (
+                    np.array(sorted(present_set), dtype=np.int8)
+                    if present_set
+                    else np.array([], dtype=np.int8)
+                )
                 dist_parte = (
                     self.sia_subsistema.bipartir(futuros, presentes)
                     .distribucion_marginal()
                 )
-                for idx_pos in parte_real:
-                    dist_reconstruida[idx_pos] = dist_parte[idx_pos]
+                for idx in future_set:
+                    pos = np.where(indices == idx)[0]
+                    if pos.size:
+                        dist_reconstruida[int(pos[0])] = dist_parte[int(pos[0])]
 
-        fmt = fmt_k_particion(
-            particion_optima,
+        fmt = fmt_bloques(
+            bloques_optimos,
             self.sia_subsistema.indices_ncubos,
             self.sia_subsistema.dims_ncubos,
         )
@@ -951,7 +1510,7 @@ class KGeoMIP(SIA):
         tiempo_prep = getattr(self, "sia_tiempo_preparacion", 0.0)
 
         return Solution(
-            estrategia=f"{KGEOMIP_LABEL}(Global Optimal K={k_optimo})",
+            estrategia=f"{KGEOMIP_LABEL}(Greedy k={k_optimo})",
             perdida=mejor_perdida,
             distribucion_subsistema=self.sia_dists_marginales,
             distribucion_particion=dist_reconstruida,
@@ -964,64 +1523,99 @@ class KGeoMIP(SIA):
 
     def _construir_tabla_costos(self) -> None:
         """
-        Construye la tabla de costos de transición entre estados del hipercubo.
+        Populate self.tabla_T, the (2**n_dims, n) float32 transition-cost table.
 
-        Algoritmo base:
-        - BFS nivel por nivel desde el estado inicial al estado final.
-        - Para cada par (i,j): t_X(i,j) = γ·(|X[i]-X[j]| + Σ t_X(k,j))
-            con γ = 2^(-dH(i,j)).
+        n      = len(indices_ncubos) = number of future/output n-cubes.
+        n_dims = len(dims_ncubos)    = dimensionality of the joint state space
+                                       (present + future active dimensions).
 
-        La tabla se almacena en self.tabla_transiciones para ser consultada
-        durante la identificación de candidatos.
+        Each n-cube column holds 2^n_dims probabilities indexed by the joint
+        present state, so the table spans 2^n_dims rows (not 2^n).
+
+        Recurrence (filled by increasing Hamming shell d around the origin):
+            local[j, x]    = |P[x][j] - P[x][origin]|
+            vecinal[j, x]  = Σ_{b : bit b of (j⊕origin) is set} tabla_T[j ^ 2^b, x]
+            tabla_T[j, x]  = (local[j, x] + vecinal[j, x]) · 2^(-d)
+        Only the bits that differ from the origin contribute to vecinal, and
+        each contribution reuses a row at the previous shell (already filled).
+
+        Persists: self.tabla_T, self._idx_origen, self._full_mask,
+        self._dist_array, self._n_dims, self._estado_inicial_tabla.
+
+        Complexity: O(n_dims · 2^n_dims) time, O(2^n_dims · n) space.
         """
-        self.tabla_transiciones.clear()
-        # Paso 1: aplanar los hipercubos a vectores 1D para acceso por índice entero.
-        self._flat_data = [
-            ncubo.data.ravel()
-            for ncubo in self.sia_subsistema.ncubos
-        ]
+        subsistema = self.sia_subsistema
+        n = len(subsistema.indices_ncubos)       # output variables (n-cubes)
+        n_dims = len(subsistema.dims_ncubos)     # joint state-space dimensions
+        total_states = 1 << n_dims
 
-        # Paso 2: obtener el estado inicial y su complemento (estado final)
-        estado_inicial = self.sia_subsistema.estado_inicial[
-            self.sia_subsistema.dims_ncubos
-        ]
-        estado_final = 1 - estado_inicial   # flip de todos los bits
-        n = len(estado_inicial)
-        idx_ncubos = list(range(len(self.sia_subsistema.indices_ncubos)))
+        if n_dims > 20:
+            self.logger.critic(
+                f"WARNING: n_dims={n_dims} > 20. "
+                f"tabla_T will require ~{total_states * n * 4 / 1e9:.2f} GB float32."
+            )
 
-        # Paso 3: entrada trivial — costo de cualquier estado hacia sí mismo = 0
-        clave_trivial = (tuple(estado_inicial), tuple(estado_inicial))
-        self.tabla_transiciones[clave_trivial] = [0.0] * len(idx_ncubos)
+        # Per-node probability rows P[x][s] = P(variable x = 1 | joint state s).
+        prob = np.array(
+            [ncubo.data.ravel() for ncubo in subsistema.ncubos],
+            dtype=np.float32,
+        )
 
-        # Paso 4: BFS nivel por nivel
-        caminos: Dict[int, List[List[int]]] = {0: [estado_inicial.tolist()]}
+        # Origin = little-endian packing of the initial state over the mechanism dims.
+        estado_ini = subsistema.estado_inicial[subsistema.dims_ncubos]
+        idx_origen = 0
+        for pos, bit in enumerate(estado_ini):
+            if bit:
+                idx_origen |= 1 << pos
+        prob_origen = prob[:, idx_origen]        # (n,)
 
-        for nivel in range(1, n + 1):
-            visitados: set = set()
-            caminos[nivel] = []
+        estados = np.arange(total_states, dtype=np.int32)
+        xor_origen = (estados ^ idx_origen).astype(np.uint32)
+        dist = _popcount_vec(xor_origen)
 
-            for estado_anterior in caminos[nivel - 1]:
-                est_ant = np.array(estado_anterior)
+        self.tabla_T = np.zeros((total_states, n), dtype=np.float32)
+        bit_pos = range(n_dims)
 
-                for i in range(n):
-                    if est_ant[i] != estado_final[i]:
-                        nuevo = est_ant.copy()
-                        nuevo[i] = estado_final[i]      # flip del bit i
-                        t = tuple(nuevo)
+        # Walk the Hamming shells outward; shell d only depends on shell d-1.
+        for d in range(1, n_dims + 1):
+            shell = np.flatnonzero(dist == d)
+            if shell.size == 0:
+                continue
 
-                        if t not in visitados:
-                            caminos[nivel].append(nuevo.tolist())
-                            self._calcular_costo(
-                                caminos[0][0], nuevo.tolist(), idx_ncubos
-                            )
-                            visitados.add(t)
+            gamma = np.float32(1.0 / (1 << d))
 
-        # Guardar los caminos y estados para uso posterior
-        self._caminos = caminos
-        self._estado_inicial_tabla = estado_inicial.tolist()
-        self._estado_final_tabla = estado_final.tolist()
+            for ini in range(0, shell.size, COST_TABLE_CHUNK_ROWS):
+                bloque = shell[ini : ini + COST_TABLE_CHUNK_ROWS]
 
-        # Construir la matriz de afinidad geométrica NxN inmediatamente
+                local = np.abs(prob[:, bloque].T - prob_origen)   # (m, n)
+
+                if d == 1:
+                    # Sole differing bit has its neighbor at the (zero) origin.
+                    self.tabla_T[bloque] = local * gamma
+                    continue
+
+                vecinal = np.zeros_like(local)
+                xor_bloque = xor_origen[bloque]
+                for b in bit_pos:                  # ascending bit order (fixed)
+                    difiere = ((xor_bloque >> np.uint32(b)) & np.uint32(1)).astype(bool)
+                    if not difiere.any():
+                        continue
+                    vecino = (bloque ^ np.int32(1 << b))[difiere]
+                    vecinal[difiere] += self.tabla_T[vecino]
+
+                self.tabla_T[bloque] = (local + vecinal) * gamma
+
+        assert self.tabla_T.shape == (total_states, n)
+
+        self._idx_origen: int = idx_origen
+        self._full_mask: int = total_states - 1
+        self._dist_array: np.ndarray = dist
+        self._n_dims: int = n_dims
+        self._estado_inicial_tabla: list = estado_ini.tolist()
+
+        # Empty dict retained for backward compatibility with external references.
+        self.tabla_transiciones = {}
+
         self._construir_matriz_afinidad()
 
 
@@ -1082,22 +1676,128 @@ class KGeoMIP(SIA):
 
     def _construir_matriz_afinidad(self) -> None:
         """
-        Construye la Matriz de Afinidad NxN entre n-cubos usando los costos
-        acumulados en self.tabla_transiciones (llenada por _construir_tabla_costos).
+        Build the N×N geometric affinity matrix from self.tabla_T.
 
-        Almacena el resultado en self._matriz_afinidad para pasarlo a los
-        procesos paralelos de _evaluar_k_completo, evitando recalcular.
+        Delegates to _construir_matriz_afinidad_desde_tabla with the full
+        (2^N, N) cost table so every variable's column profile spans the
+        entire hypercube rather than just the N-state BFS path.
+
+        Result stored in self._matriz_afinidad for _evaluar_k_completo.
         """
         n = len(self.sia_subsistema.indices_ncubos)
         self._matriz_afinidad: np.ndarray = _construir_matriz_afinidad_desde_tabla(
-            self.tabla_transiciones,
+            self.tabla_T,
             n,
-            self._estado_inicial_tabla,
         )
         self.logger.critic(
-            f"Matriz de afinidad {n}×{n} construida "
-            f"(sklearn={'disponible' if _SKLEARN_DISPONIBLE else 'no disponible'})."
+            f"Affinity matrix {n}×{n} built from full tabla_T "
+            f"(sklearn={'available' if _SKLEARN_DISPONIBLE else 'not available'})."
         )
+
+    # ── Candidatos asimétricos desde tabla_T ─────────────────────────────────
+
+    def _candidatos_desde_tabla_T(
+        self,
+    ) -> "List[Tuple[List[int], List[int]]]":
+        """
+        Generate asymmetric bipartition candidates from the full cost table.
+
+        Unlike _generar_candidatos_hipercubo_completo (which produces symmetric
+        cuts where future and present are derived from the same bit-flip set),
+        this method separates the two axes:
+
+          - present_pos: positions (in dims_ncubos) corresponding to bits that
+            did NOT change when moving from idx_origen to j* — these represent
+            the nodes that remain on the "present/mechanism" side.
+          - effects_pos: positions (in indices_ncubos) where j*'s cost profile is
+            cheaper than its complement — these represent the future/alcance side.
+
+        The two sets are derived from independent criteria and can be different,
+        producing cuts where each block has its own (future, present) specification.
+
+        Algorithm:
+          For each Hamming level d = 1..(n_dims//2 + 1):
+            j* = argmin_j  min(tabla_T[j], tabla_T[j ^ full_mask]).sum()
+            flipped = j* XOR idx_origen
+            present_pos = bits that did NOT change: {b : not (flipped >> b) & 1}
+            effects_pos = output vars cheaper at j*: {b : tabla_T[j*][b] <= tabla_T[comp][b]}
+            Convert positions to real node indices using indices_ncubos / dims_ncubos.
+            Emit both the primary side and its complement as separate candidates.
+
+        Returns:
+            List of (future_real_indices, present_real_indices) tuples.
+            Indices are real global node labels (values of indices_ncubos / dims_ncubos),
+            NOT local position integers.
+        """
+        n      = len(self.sia_subsistema.indices_ncubos)   # number of future n-cubes
+        n_dims = self._n_dims                               # joint state-space dimensionality
+        indices = self.sia_subsistema.indices_ncubos        # real future node indices
+        dims    = self.sia_subsistema.dims_ncubos           # real present node indices
+
+        idx_origen = self._idx_origen
+        full_mask  = self._full_mask
+        dist       = self._dist_array
+        total_states = len(self.tabla_T)
+        all_states   = np.arange(total_states, dtype=np.int32)
+
+        candidates: list = []
+        seen: set        = set()
+
+        for d in range(1, n_dims // 2 + 2):
+            mask_d = dist == d
+            estados_nivel = all_states[mask_d]
+            if len(estados_nivel) == 0:
+                continue
+
+            # Find j* = argmin symmetric cost over all states at this Hamming level.
+            best_cost = np.inf
+            best_j    = -1
+            for start in range(0, len(estados_nivel), COST_TABLE_CHUNK_ROWS):
+                chunk      = estados_nivel[start : start + COST_TABLE_CHUNK_ROWS]
+                current    = self.tabla_T[chunk]
+                complement = self.tabla_T[chunk ^ full_mask]
+                costs      = np.minimum(current, complement).sum(axis=1)
+                idx_local  = int(np.argmin(costs))
+                if float(costs[idx_local]) < best_cost:
+                    best_cost = float(costs[idx_local])
+                    best_j    = int(chunk[idx_local])
+
+            if best_j < 0:
+                continue
+
+            flipped = best_j ^ idx_origen
+
+            # present_pos: positions (in dims) whose corresponding state bit did NOT
+            # change moving from origin to j*.  Iterates over n_dims since flipped
+            # is an n_dims-bit integer.
+            present_pos = [b for b in range(n_dims) if not (flipped >> b) & 1]
+
+            # effects_pos: output variable positions (in indices_ncubos) where
+            # the cost at j* is cheaper than the cost at j*'s bit complement.
+            row_j = self.tabla_T[best_j]
+            row_c = self.tabla_T[best_j ^ full_mask]
+            effects_pos = [b for b in range(n) if row_j[b] <= row_c[b]]
+
+            # Convert positions to real global node indices.
+            future_side  = [int(indices[p]) for p in effects_pos]
+            present_side = [int(dims[p])    for p in present_pos if p < len(dims)]
+
+            # Complement: nodes NOT on each side.
+            future_set  = set(future_side)
+            present_set = set(present_side)
+            future_other  = [int(x) for x in indices if x not in future_set]
+            present_other = [int(x) for x in dims    if x not in present_set]
+
+            # Emit both the primary side and its complement as separate candidates.
+            for fs, ps in [(future_side, present_side), (future_other, present_other)]:
+                if not fs:   # future side must be non-empty for a valid block
+                    continue
+                key = (tuple(sorted(fs)), tuple(sorted(ps)))
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append((list(fs), list(ps)))
+
+        return candidates
 
     # ── Estrategia: heurística jerárquica bottom-up (fallback de clase) ──────
 

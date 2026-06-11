@@ -2,310 +2,139 @@
 
 **Referencia:** `projecto-analisis-20261/QNodes` → `AYDA_2026_1/QNodes`
 
+> **Estado actual (2026-06-10):** QNodes fue reescrito a un **motor asimétrico
+> unificado** (greedy top-down + refinamiento 1-move futuro/presente + ILS, con
+> métrica L1 marginal = EMD de Hamming exacta). Este documento describe el estado
+> vigente; las secciones finales conservan el historial de la evolución.
+
 ---
 
-## 1. Cambio central: de bipartición greedy a k-partición aglomerativa
+## 1. Cambio central: de bipartición greedy a k-partición asimétrica unificada
 
-El cambio más importante es el alcance del problema y el algoritmo que lo resuelve.
-
-| Aspecto | `projecto-analisis-20261` | `AYDA_2026_1` |
+| Aspecto | `projecto-analisis-20261` | `AYDA_2026_1` (actual) |
 |---|---|---|
-| Particiones soportadas | Solo k = 2 (bipartición) | k ∈ [2, N] (cualquier k) |
-| Algoritmo principal | Greedy iterativo (k=2 único) | Agrupamiento aglomerativo greedy |
-| Complejidad | O(N² × EMD) | O(N³ × EMD) — tratable para N ≤ 25 |
-| Garantía | Óptimo local (greedy k=2) | Óptimo local greedy para cada k |
-| Mecanismo vacío (∅) | No soportado | Soportado con `permitir_presente_vacio` |
-| Tamaños manejables | N ≤ ~12 (limitado por EMD, no por partición) | N ≤ 25 en tiempo razonable |
+| Particiones soportadas | Solo k = 2 (bipartición) | k ∈ [2, N], mismo motor para todo k |
+| Representación | `list[tuple(tiempo, índice)]` | `Bloque = (frozenset futuros, frozenset presentes)` |
+| Cortes | Simétricos | **Asimétricos** (futuro/presente independientes) |
+| Algoritmo principal | Greedy incremental k=2 | Greedy **top-down** + 1-move + ILS |
+| Métrica EMD | L1 marginal (asumida aproximación) | L1 marginal = **Wasserstein-1 Hamming EXACTA** |
+| Límite de tamaño | N ≤ ~12 (por la EMD) | Sin límite — L1 es O(N) para todo N |
+| Mecanismo vacío (∅) | No soportado | Soportado (corte `({i}, ∅)`) |
 
 ---
 
-## 2. Cambio de algoritmo: greedy k=2 → agrupamiento aglomerativo greedy k∈[2,N]
+## 2. Representación asimétrica de bloques (el cambio que lo unifica todo)
 
-### Versión original (`QNodes`)
+Cada bloque es un par `(frozenset futuros, frozenset presentes)` donde el futuro (t+1)
+y el presente/mecanismo (t) se particionan de forma **independiente**. Esto generaliza
+a todo k el corte asimétrico que antes sólo se usaba para k=2, y elimina la distinción
+entre el caso k=2 y k≥3.
 
-Construía la bipartición de forma incremental usando una función submodular:
-comienza con ω = {primer_vértice}, Δ = {resto}, y en cada paso añade a ω el
-vértice de Δ que minimiza `EMD(ω ∪ δ) − EMD(δ)`. Producía solo una bipartición
-(k = 2) y era intrínsecamente imposible extenderlo a k > 2 sin perder la
-propiedad de optimalidad local.
-
-### Versión nueva (`QNodes` en AYDA_2026_1)
-
-Usa agrupamiento jerárquico aglomerativo (bottom-up) con la misma función de
-costo basada en EMD:
-
-```
-Inicializar N singletons: G₀ = {nodo_0}, G₁ = {nodo_1}, ..., G_{N-1}
-phi_total = Σᵢ costo(Gᵢ)
-
-Repetir hasta tener 2 grupos:
-    Encontrar par (Gᵢ, Gⱼ) que minimice:
-        Δ = costo(Gᵢ ∪ Gⱼ) − costo(Gᵢ) − costo(Gⱼ)
-    Fusionar Gᵢ y Gⱼ → G_nuevo
-    phi_total += Δ
-    Registrar {k_actual: (phi_total, grupos)}
-
-Después del agrupamiento → refinar con búsqueda local 1-move
-Retornar k con menor phi (k ≥ 3 como prioridad)
-```
-
-El resultado natural es una jerarquía completa de k-particiones de k=N a k=2,
-de la que se extrae la de menor phi.
+**Causa raíz del salto k=2→k=3 (resuelto):** la versión intermedia usaba cortes
+asimétricos sólo para k=2; para k≥3 usaba cortes **simétricos** que sobre-cortaban e
+inflaban Φ. Medido en N10A: simétrico k=3 = 2.5059 vs asimétrico k=3 = 0.9590. El motor
+actual usa asimétrico para **todo** k → Φ monótono y coherente.
 
 ---
 
-## 3. Filosofía greedy preservada, generalizada a k dimensiones
+## 3. Algoritmo: greedy top-down (no aglomerativo bottom-up)
 
-El principio submodular original —elegir la operación que minimiza el incremento
-de EMD— se preserva en la función de selección de fusión:
+El motor parte de **un solo bloque** (todo el subsistema) y aplica las mejores
+divisiones:
 
 ```
-Δ(Gᵢ, Gⱼ) = costo(Gᵢ ∪ Gⱼ) − costo(Gᵢ) − costo(Gⱼ)
+_construir_pool_cortes()  → O(N) cortes (3 familias por nodo), construido UNA vez
+_greedy_descenso(pool)    → un descenso k=1..N, registra Φ por cada k (jerarquía nido)
+_refinar_bloques(...)     → 1-move futuro + 1-move presente (asimétrico)
+_refinar_con_ils(...)     → perturbación + re-refinamiento (N-adaptativo)
 ```
 
-Si Δ < 0, fusionar los grupos REDUCE el phi total. Si Δ > 0, lo aumenta.
-El greedy elige siempre el par con menor Δ, exactamente el mismo principio que
-la versión original aplicaba a la incorporación de vértices uno a uno.
+Un único descenso produce una jerarquía **anidada** → coherencia (Φ monótono) entre k
+consecutivos. (Detalles en `docs/estrategia-k-particion.md`.)
 
 ---
 
-## 4. Representación de conjuntos: tuplas (tiempo, índice) → máscaras enteras
+## 4. Corrección y aceleración del cálculo de EMD
 
-| | `projecto-analisis-20261` | `AYDA_2026_1` |
+El cambio de mayor impacto. La métrica L1 marginal **es** la Wasserstein-1 con Hamming
+EXACTA (no una aproximación), porque tanto la distribución original como la
+reconstruida de cualquier k-partición son **productos de marginales por nodo**:
+
+```
+EMD_Hamming(P, Q) = Σᵢ |P(nodo_i = ON) − Q(nodo_i = ON)|     (verificado |·| < 1e-14 para N=2..12)
+```
+
+Consecuencias:
+- **Más rápido:** O(N) por evaluación en vez de O(4^N) del solver `pyemd`.
+- **Más preciso:** da el MISMO Φ que la EMD real (k=2 N10A = 0.4746, idéntico a GeoMIP).
+- **Sin límite de tamaño:** se eliminó la dependencia de `pyemd` y el techo N ≤ 12.
+
+> Esto **corrige** la nota antigua que afirmaba que L1 = pyemd "sólo si P es producto,
+> lo cual no ocurre en IIT": sí ocurre aquí por construcción.
+
+---
+
+## 5. Refinamiento 1-move asimétrico + ILS (nuevo)
+
+La versión original no tenía mejora post-greedy. La actual añade:
+- **Movimiento futuro:** reubica un nodo futuro entre bloques.
+- **Movimiento presente (asimétrico):** reubica el mecanismo de un nodo sin mover su
+  futuro — imposible en representaciones simétricas.
+- **ILS:** perturbación + re-refinamiento N-adaptativo para escapar de mínimos locales.
+
+---
+
+## 6. Entrada de datos: hardcodeada → interactiva
+
+**Original:** estado, TPM y sistema definidos en `src/main.py`; cambiar de sistema
+exigía editar el código.
+
+**Actual:** `exec.py` con menú de dos modos:
+- **Modo manual:** ingreso por terminal de estado, candidato, alcance, mecanismo y k.
+- **Modo por bloque (CSV):** múltiples sistemas; resultados volcados incrementalmente.
+
+El candidato y el estado inicial se ingresan una sola vez para todo el lote.
+
+---
+
+## 7. Infraestructura
+
+| Capacidad | Original | Actual |
 |---|---|---|
-| Tipo | `list[tuple[int, int]]` | `int` (bitmask) |
-| Ejemplo nodos {A, C} | `[(0,0),(0,2),(1,0),(1,2)]` | `0b0101 = 5` |
-| Unión | `list + list` | `a \| b` |
-| Complemento | bucle explícito | `total ^ a` |
-| Bit mínimo | `min(lista)` | `m & (-m)` |
-
-La representación en máscaras enteras elimina la distinción entre vértices
-presentes y futuros de la misma representación, simplificando el código.
-
----
-
-## 5. Refinamiento local 1-move (nuevo)
-
-La versión original no tenía ningún paso de mejora post-greedy. `AYDA_2026_1`
-añade un refinamiento que itera hasta convergencia probando mover cada nodo
-a otro grupo:
-
-```
-Para cada nodo n en grupo Gᵢ:
-    Para cada grupo Gⱼ (j ≠ i):
-        Δ = costo(Gᵢ \ {n}) + costo(Gⱼ ∪ {n}) − costo(Gᵢ) − costo(Gⱼ)
-        Si Δ < 0: aceptar el movimiento y reiniciar
-```
-
-Esto captura mejoras locales que el greedy aglomerativo pierde al fusionar
-en el orden incorrecto, mejorando la calidad de la solución sin aumentar
-la complejidad asintótica significativamente.
-
----
-
-## 6. Corrección del cálculo de EMD
-
-En el proyecto original el EMD reportado era "artificial" — se calculaba
-directamente con L1 puro sobre el vector completo.
-
-En `AYDA_2026_1` el phi es **aditivo sobre las partes**:
-
-```
-phi(particion) = Σᵢ costo(Pᵢ) = Σᵢ Σⱼ∈Pᵢ |dist_parte[j] − dist_sistema[j]|
-```
-
-La aditividad es la propiedad que hace que el greedy y la búsqueda local
-sean matemáticamente coherentes: el delta de una fusión se puede calcular
-directamente como diferencia de costos, sin recalcular el sistema completo.
-
----
-
-## 7. Entrada de datos: hardcodeada → interactiva
-
-**Original:** estado inicial, TPM y sistema definidos en `src/main.py`.
-Para cambiar de sistema era necesario editar el código fuente.
-
-**Nueva versión:** `exec.py` con menú interactivo de dos modos:
-- **Modo manual:** ingreso por terminal de nodos, estado y estrategia.
-- **Modo por bloque (CSV):** selección de CSV con múltiples sistemas;
-  resultados volcados incrementalmente a Excel.
-
----
-
-## 8. Nuevas capacidades de infraestructura
-
-| Capacidad | Original | Nuevo |
-|---|---|---|
-| Profiling | Básico / manual | `pyinstrument` con reporte HTML |
-| Logger | `print` simple | `slogger.py` con niveles y colores |
-| Excel | Post-ejecución manual | Actualización incremental por sistema |
+| Profiling | Manual | `pyinstrument` con reporte HTML |
+| Logger | `print` | `slogger.py` con niveles y colores |
+| Salida | Manual | Incremental por sistema |
 | Validaciones | Mínimas | Exhaustivas (alcance ⊆ candidato, estado coherente) |
-| Síntesis de voz | No | `pyttsx3` en `Solution` para narrar resultados |
 
 ---
 
-## 9. Archivos sin cambios estructurales
+## 8. Equivalencia con GeoMIP
 
-- `src/models/core/ncube.py` — idéntico entre versiones
-- `src/models/core/system.py` — idéntico entre versiones
-- `src/models/base/sia.py` — idéntico entre versiones
-- `src/strategies/force.py` — cambios menores de estilo
-- `src/strategies/phi.py` — sin cambios
-- `src/funcs/format.py` — sin cambios (el formato de k-partición ya era compatible)
-
----
-
-## 10. Alineación con GeoMIP: EMD real + candidatos de aislamiento (2026-06-08)
-
-### Problema detectado
-
-Al comparar los resultados de QNodes y GeoMIP sobre el mismo sistema (N10A, k=3),
-los valores de `perdida_phi` diferían significativamente (3.46 vs 2.51) y las
-`distribucion_subsistema` eran complementarias entre sí.
-
-Se identificaron dos bugs independientes:
-
----
-
-### Bug 1 — Métrica EMD incorrecta (causa raíz de la diferencia en phi)
-
-**Antes:** QNodes usaba siempre la suma L1 marginal como "EMD":
-
-```
-phi_parte(Pᵢ) = Σⱼ∈Pᵢ |p_Pᵢ(j) − p_S(j)|
-phi_total    = Σᵢ phi_parte(Pᵢ)          ← suma aditiva por partes
-```
-
-Aunque este costo es aditivo (propiedad usada por el greedy), **no es la EMD
-matemáticamente correcta de IIT**. La verdadera EMD de IIT es la distancia de
-Wasserstein-1 con métrica base Hamming sobre el espacio conjunto de estados:
-
-```
-EMD_Hamming(P, Q) = Wasserstein-1(P_conjunta, Q_conjunta, d_Hamming)
-```
-
-La suma L1 marginal es una aproximación que sobreestima phi y conduce el greedy
-a una partición subóptima distinta de la que GeoMIP encuentra.
-
-**Después:** todas las evaluaciones de la estrategia usan `_emd_particion`, que
-internamente aplica la métrica más precisa posible: Wasserstein-1 con d_Hamming
-cuando la distribución conjunta 2^N es tratable (N ≤ HAMMING_EMD_MAX_N), y suma
-L1 marginal como aproximación rápida para N grandes. Esta decisión es interna a
-`_emd_particion` y es transparente para la estrategia: las tres fases del algoritmo
-(agrupamiento, refinamiento, candidatos de aislamiento) llaman siempre a
-`_emd_particion` sin bifurcarse según N.
-
-**Archivos modificados:**
-
-- `src/funcs/iit.py`:
-  - Añadida constante `HAMMING_EMD_MAX_N = 12`.
-  - Añadida función `get_hamming_matrix(n)` con caché en `_HAMMING_CACHE`.
-  - Añadida función `distribucion_conjunta_vectorizada(probabilidades)`.
-  - `emd_causal` actualizado para usar `get_hamming_matrix` (primer llamada O(4^N),
-    siguientes O(1)).
-
-- `src/strategies/q_nodes.py`:
-  - Añadido método `_emd_particion(grupos)`: calcula el Phi total de la partición;
-    aplica Hamming EMD o L1 según N de forma interna y transparente.
-  - `_aglomerar`: siempre evalúa cada fusión candidata con `_emd_particion`.
-  - `_refinamiento_local`: siempre evalúa cada movimiento con `_emd_particion`.
-  - `aplicar_estrategia`: las tres fases (agrupamiento, refinamiento, candidatos
-    de aislamiento) se aplican para todo N sin bifurcaciones por tamaño.
-
----
-
-### Bug 2 — `distribucion_subsistema` complementaria (cosmético)
-
-**Antes:** `GeoMIP/system.py` calculaba `1 − probabilidad` en `distribucion_marginal`,
-almacenando P(nodo = OFF). QNodes almacenaba P(nodo = ON). Los valores mostrados
-en los JSON de salida eran complementarios (donde uno tenía 1.0 el otro tenía 0.0).
-
-**Después:** `GeoMIP/system.py` corregido para almacenar `probabilidad` directamente,
-es decir P(nodo = ON), igual que QNodes. Ambos módulos ahora reportan la misma
-convención. La corrección no afecta los valores de EMD (la distancia de Hamming
-es simétrica bajo inversión de bits, y la L1 tampoco cambia: `|p − q| = |(1−p) − (1−q)|`).
-
-**Archivo modificado:** `GeoMIP/src/.../models/core/system.py` línea 316.
-
----
-
-### Fase 3: candidatos de aislamiento (nuevo, activo para todo N)
-
-Incluso con la métrica correcta, el greedy aglomerativo puede pasar por alto
-particiones estructuralmente simples donde k-1 nodos están completamente aislados.
-GeoMIP evalúa explícitamente todos los C(N, k-1) candidatos de este tipo.
-
-**Añadido:** método `_candidatos_aislamiento(k)` que genera las mismas C(N, k-1)
-particiones que `_generar_candidatos_aislamiento` de GeoMIP. Después del refinamiento
-local, si algún candidato de aislamiento tiene menor phi que la solución del greedy,
-se adopta como nueva solución y se refina nuevamente.
-
-Se aplica para todo N: tanto en modo k especificado (C(N, k-1) candidatos) como
-en modo k libre (candidatos de todos los niveles k del historial, 2^N − 2 en total).
-Esto garantiza que QNodes busca de forma completamente independiente sin depender
-de GeoMIP para ningún tamaño de sistema.
-
----
-
-### Resultado
-
-Con ambas correcciones, QNodes y GeoMIP obtienen resultados comparables.
-Para k especificado, coinciden exactamente:
-
-| Sistema | GeoMIP phi | QNodes phi (antes) | QNodes phi (k=3 fijo) |
-|---|---|---|---|
-| N10A, k=3, vacio=False | 2.505859375 | 3.458984375 | **2.505859375** ✓ |
-
-Cuando k=None (libre), QNodes puede retornar un k distinto al de GeoMIP si existe
-un nivel k diferente con menor phi global — esto es intencional (ver sección 12).
+QNodes y GeoMIP dan el **mismo Φ** para todo k, porque ambos comparten ahora:
+cortes asimétricos, greedy top-down con pool de cortes, refinamiento 1-move
+futuro/presente, ILS, y métrica L1 = EMD Hamming exacta. Si vuelve a aparecer un
+"salto" entre k consecutivos, sospechar de cortes simétricos colándose.
 
 ---
 
 ---
 
-## 12. Búsqueda independiente: QNodes al 100% sin depender de GeoMIP (2026-06-08)
+## Historial de evolución (referencia)
 
-### Motivación
+**2026-06-08 — Alineación con GeoMIP.** Se igualó la métrica con GeoMIP y se añadieron
+candidatos de aislamiento. En esa etapa la métrica seleccionaba entre EMD-Hamming
+(`pyemd`, N ≤ 12) y L1 (N > 12), y el motor era aglomerativo bottom-up.
 
-La Fase 3 (candidatos de aislamiento) se añadió originalmente solo para el caso
-`k especificado`, replicando el comportamiento de GeoMIP. Cuando `k=None` (búsqueda
-libre), esa fase se saltaba y QNodes solo usaba el greedy + refinamiento.
-
-Esto significaba que QNodes en modo libre era menos exhaustivo que GeoMIP, y que
-su resultado dependía indirectamente de que el greedy coincidiera con lo que GeoMIP
-hubiera encontrado para algún k.
-
-### Cambio
-
-`_aglomerar()` ahora **siempre retorna el historial completo** `{k: (phi, grupos)}`
-para todos los k ∈ [2, N]. La selección de k y las fases de refinamiento quedan
-en `aplicar_estrategia`.
-
-**Para `k` especificado:** comportamiento idéntico al anterior (refinamiento + candidatos
-de aislamiento para ese k exacto).
-
-**Para `k=None` (cualquier N):** búsqueda exhaustiva independiente:
-1. Construir la jerarquía greedy completa.
-2. Para **cada nivel k** del historial (k ∈ [2, N−1]):
-   - Refinar con 1-move.
-   - Evaluar todos los candidatos de aislamiento C(N, k−1).
-   - Refinar de nuevo si se encontró mejor candidato.
-3. Elegir el k con menor phi (≥3 preferido) entre todos los niveles refinados.
-
-### Consecuencia
-
-Para k libre, QNodes puede retornar un k o una partición **distinta** a la de GeoMIP
-si existe un nivel k diferente con menor phi global. Ambos son matemáticamente
-válidos; QNodes maximiza su propia búsqueda sin estar anclado a la estrategia de
-GeoMIP, para cualquier tamaño de sistema.
+**2026-06-10 (tarde) — Reescritura al motor asimétrico unificado (estado vigente).**
+Se descubrió que la L1 marginal es la EMD-Hamming exacta (no aproximación), lo que
+permitió eliminar `pyemd` y el límite N ≤ 12. Se reemplazó el motor aglomerativo por el
+greedy top-down sobre bloques asimétricos `(futuros, presentes)`, con refinamiento
+1-move futuro/presente e ILS. Quedó un único motor para todo k, sin el salto k=2→k=3.
 
 ---
 
-## 11. Archivos sin cambios estructurales (vigente)
+## Archivos sin cambios estructurales
 
-- `src/models/core/ncube.py`
-- `src/models/core/system.py`
-- `src/models/base/sia.py`
-- `src/strategies/force.py`
-- `src/strategies/phi.py`
-- `src/funcs/format.py`
+- `src/models/core/ncube.py`, `src/models/core/system.py`, `src/models/base/sia.py`
+- `src/strategies/force.py`, `src/strategies/phi.py`
+- `src/funcs/format.py` (el formateador `fmt_k_bloques` ya era compatible)

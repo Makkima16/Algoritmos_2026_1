@@ -22,7 +22,31 @@ se usa (o no) cada paradigma.
 
 ---
 
-## 1. Heurística / Aproximación — SÍ SE USA (paradigma principal)
+## 0. Motor principal actual: Greedy Top-Down sobre bloques asimétricos
+
+> **Estado vigente.** La ruta principal de `aplicar_estrategia` es un **greedy top-down
+> (divisivo)** sobre bloques asimétricos `Block = (frozenset futuros, frozenset presentes)`. El
+> pipeline de SpectralClustering/AgglomerativeClustering descrito en la sección 1 quedó como
+> **fallback** y ya no es el camino por defecto.
+
+```
+_construir_cut_pool(...)   → pool de O(N) cortes, construido UNA vez, compartido por todo k
+_greedy_k_particion(...)   → desde 1 bloque (todo el subsistema), k-1 mejores splits
+_refinar_bloques_1move(...) → 1-move futuro + 1-move presente (asimétrico)
+ILS (N_ILS=4)              → perturbar + re-refinar, conservar el mejor Φ
+```
+
+El punto clave que vuelve **tratable** el top-down divisivo (que la sección 6 descartaba por
+"evaluar O(2^N) cortes en el primer nivel") es que **no** se evalúan todos los cortes posibles:
+sólo un **pool de O(N) cortes** construido una vez desde la tabla de costos. Así, cada split
+evalúa O(N·|pool|) configuraciones, no O(2^N). El descenso es anidado → Φ coherente entre k.
+
+Combina por tanto **Greedy** (sección 2) como motor de búsqueda y **Top-Down divisivo** como
+estrategia de recorrido (sección 6), apoyados en la métrica L1 marginal exacta O(N).
+
+---
+
+## 1. Heurística / Aproximación — fallback (no es ya el paradigma principal)
 
 ### ¿Qué es?
 Un algoritmo heurístico no garantiza encontrar el óptimo global, pero encuentra soluciones muy
@@ -77,7 +101,7 @@ decenas de candidatos con garantía práctica de encontrar la MIP exacta en la m
 
 ---
 
-## 2. Greedy (Voraz) — SÍ SE USA (refinamiento y selección)
+## 2. Greedy (Voraz) — SÍ SE USA (motor de búsqueda principal + refinamiento)
 
 ### ¿Qué es?
 Un algoritmo voraz toma la decisión localmente óptima en cada paso sin reconsiderar decisiones
@@ -85,7 +109,14 @@ anteriores, con la esperanza de que la secuencia de decisiones locales lleve a u
 
 ### ¿Cómo y dónde se usa en GeoMIP?
 
-**a) Refinamiento 1-move (Hill Climbing Greedy)**
+**a) Greedy top-down (motor de búsqueda principal — `_greedy_k_particion`)**
+
+Desde un único bloque que cubre todo el subsistema, en cada paso se elige el par (bloque, corte)
+cuya división minimiza Φ, hasta alcanzar k bloques. Es la decisión voraz central: nunca se
+deshace una división. Un descenso de k=1 a k=N registra Φ por cada k (jerarquía anidada). Sólo se
+prueban los O(N) cortes del pool, no O(2^N). (Ver sección 0.)
+
+**b) Refinamiento 1-move (Hill Climbing Greedy)**
 
 Es el componente voraz más explícito del sistema. Dado el mejor candidato inicial, evalúa todos
 los "vecinos" posibles (mover un nodo a otro bloque) y acepta el mejor movimiento:
@@ -332,12 +363,14 @@ El clustering jerárquico busca estructura **local** entre nodos y la construye 
 Cada fusión une los dos nodos o grupos más "similares" (según la afinidad o la pérdida EMD),
 acumulando estructura de lo simple a lo complejo.
 
-La alternativa Top-Down (divisive clustering) partiría el sistema completo recursivamente.
-Para la k-MIP esto es menos eficiente porque:
-1. Partir el sistema completo requiere evaluar O(2^N) posibles cortes en el primer nivel
-2. El primer corte es el más crítico y el más costoso de evaluar exhaustivamente
-3. La estructura de afinidad local (similitud coseno entre pares de nodos) es exactamente
-   la información que el Bottom-Up aprovecha de forma natural
+El **fallback** Bottom-Up (Agglomerative) construye estructura local entre pares. El Top-Down
+divisivo *ingenuo* sería costoso si evaluara todos los cortes posibles, pero esto se resuelve con
+el **pool de O(N) cortes** del motor principal (sección 0): en lugar de O(2^N) cortes por nivel,
+sólo se prueban O(N). Por eso el motor vigente es **Top-Down divisivo con pool acotado**, y el
+Bottom-Up queda relegado a fallback:
+1. Un Top-Down sin pool requeriría evaluar O(2^N) cortes en el primer nivel — inviable.
+2. Con el pool de O(N) cortes, cada split evalúa O(N·|pool|), tratable para todo N del proyecto.
+3. El descenso anidado da una jerarquía coherente de Φ para todos los k en un solo recorrido.
 
 Bottom-Up también tiene la ventaja de que produce una **jerarquía completa** de particiones
 (dendrograma): con una sola ejecución se obtienen candidatos para k=2, k=3, ..., k=N cortando
@@ -349,11 +382,12 @@ el dendrograma a distintas alturas. Esto amortiza el costo del clustering entre 
 
 | Componente                        | Paradigma      | Razón de la Elección                                           |
 |-----------------------------------|----------------|----------------------------------------------------------------|
+| **`_greedy_k_particion` (motor principal)** | **Top-Down + Greedy** | Divide el sistema en k-1 splits; pool de O(N) cortes lo hace tratable (no O(2^N)) |
 | `NCube.marginalizar()` (caché)    | Top-Down (DP)  | Se piden sólo algunas marginalizaciones; precomputar todo sería 2^N entradas por NCube |
-| `AgglomerativeClustering`         | Bottom-Up      | Estructura local entre pares → construir hacia arriba es natural y eficiente |
-| Fallback jerárquico (`_evaluar_k_completo`) | Bottom-Up + Greedy | Fusionar el par de menor pérdida: O(N²) pares evaluados vs. O(2^N) cortes top-down |
-| Spectral Clustering               | Global (ni B-U ni T-D) | Opera sobre el espectro de la matriz de afinidad completa; no es recursivo |
-| Refinamiento 1-move               | Greedy local   | Explorar vecinos del punto actual; no requiere recorrido del árbol |
+| `AgglomerativeClustering` (fallback) | Bottom-Up   | Estructura local entre pares → construir hacia arriba es natural y eficiente |
+| Fallback jerárquico (`_evaluar_k_completo`) | Bottom-Up + Greedy | Fusionar el par de menor pérdida cuando no hay sklearn |
+| Spectral Clustering (fallback)    | Global (ni B-U ni T-D) | Opera sobre el espectro de la matriz de afinidad completa; no es recursivo |
+| Refinamiento 1-move (futuro+presente) | Greedy local | Explorar vecinos del punto actual; no requiere recorrido del árbol |
 | ILS (Iterated Local Search)       | Metaheurística | Perturb + refine; escapa de mínimos locales del 1-move          |
 
 ---
@@ -364,9 +398,10 @@ el dendrograma a distintas alturas. Esto amortiza el costo del clustering entre 
 |----------------------------|-----------------------|-------------------------------------------------------------------------------------|
 | **Backtracking**           | NO                    | Sin poda efectiva: Φ no está definido para particiones parciales. Degeneraría en fuerza bruta con overhead de recursión |
 | **Branch & Bound**         | NO                    | No existe cota inferior ajustada para Φ parcial. Sin cota, B&B = backtracking = fuerza bruta |
-| **Heurística/Aproximación**| SÍ (paradigma principal) | Spectral + Agglomerative + Aislamiento generan candidatos de calidad sin explorar el espacio completo |
-| **Greedy (Voraz)**         | SÍ (refinamiento)     | 1-move Hill Climbing garantiza mínimo local de forma muy rápida; es el motor de refinamiento |
-| **DP Top-Down (Memo)**     | SÍ (parcial)          | `NCube.marginalizar()` usa memoización: paga sólo por lo que se computa, no por todo el espacio de marginalizaciones |
+| **Greedy Top-Down (divisivo)** | **SÍ (motor principal)** | `_greedy_k_particion`: divide en k-1 splits sobre un pool de O(N) cortes; jerarquía anidada coherente entre k |
+| **Heurística/Aproximación**| SÍ (fallback)         | Spectral + Agglomerative + Aislamiento generan candidatos sin explorar el espacio completo |
+| **Greedy (Voraz)**         | SÍ (búsqueda + refinamiento) | Greedy top-down (búsqueda) + 1-move Hill Climbing futuro/presente (refinamiento) |
+| **Metaheurística (ILS)**   | SÍ                    | Perturbación + re-refinamiento N_ILS=4; escapa de mínimos locales |
+| **DP Top-Down (Memo)**     | SÍ (parcial)          | `NCube.marginalizar()` paga sólo por lo que se computa |
 | **DP Bottom-Up**           | NO (para k-MIP global)| k-MIP no tiene subestructura óptima: la mejor k-partición no se construye desde (k-1)-particiones óptimas |
-| **Bottom-Up (clustering)** | SÍ (heurística)       | Agglomerative y fallback jerárquico: la estructura local entre pares se construye naturalmente de abajo hacia arriba |
-| **Top-Down (clustering)**  | NO (divisive)         | Divisive clustering requeriría evaluar O(2^N) cortes en el primer nivel; peor que Bottom-Up aquí |
+| **Bottom-Up (clustering)** | SÍ (fallback)         | Agglomerative y fallback jerárquico cuando no hay sklearn |

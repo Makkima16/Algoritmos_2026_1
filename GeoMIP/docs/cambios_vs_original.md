@@ -2,235 +2,164 @@
 
 ## Contexto
 
-El código original (`projecto-analisis-20261`) era una implementación imperativa genérica que resolvía
-únicamente **biparticiones** (k = 2). La versión actual (`AYDA_2026_1 / GeoMIP`) reimplementa el
-problema con rigor matemático, soporte para **k-particiones generalizadas** y una arquitectura
-completamente diferente.
+El código original (`projecto-analisis-20261`) era una implementación imperativa
+genérica que resolvía únicamente **biparticiones** (k = 2). La versión actual
+(`AYDA_2026_1 / GeoMIP`) reimplementa el problema con soporte para **k-particiones**,
+una arquitectura OOP, y — en su estado vigente — un **motor greedy top-down sobre
+bloques asimétricos** con métrica **L1 marginal = EMD de Hamming exacta**.
+
+> **Estado actual:** la ruta principal de `aplicar_estrategia` es el motor greedy
+> top-down asimétrico (idéntico en filosofía a QNodes). El pipeline de
+> SpectralClustering quedó como **fallback**.
 
 ---
 
-## 1. Métrica de Distancia — EMD Real vs. Suma L1 Simple
+## 1. Métrica de Distancia — L1 marginal = EMD de Hamming EXACTA
 
 ### Original
 ```python
-# emd_efecto: diferencia absoluta nodo por nodo, independiente del espacio
 def emd_efecto(u, v):
-    return np.sum(np.abs(u - v))
+    return np.sum(np.abs(u - v))   # diferencia marginal nodo a nodo, sin fundamento
 ```
 
-La función `emd_efecto` sumaba directamente las diferencias de probabilidad marginal nodo a nodo.
-Esta operación es correcta **sólo cuando se asume que los nodos son completamente independientes**,
-lo que rara vez se cumple en un sistema real. El resultado era un Phi (Φ) artificialmente bajo.
-
-**Problema:** Al ignorar la topología del espacio de estados (el hipercubo de Hamming), el valor de Φ
-no tenía interpretación causal rigurosa y dependía del orden de los nodos, no de su estructura.
+Sumaba diferencias marginales sin justificación sobre el espacio de estados; el Φ
+resultante no tenía interpretación causal y dependía del orden de los nodos.
 
 ### Actual
+La misma forma L1 — pero ahora **fundamentada y exacta**. Como la distribución original
+y la reconstruida son **productos de marginales** (independencia condicional por
+construcción), la EMD de Wasserstein-1 con distancia base de Hamming **se descompone
+exactamente** en la suma L1 marginal:
+
 ```python
-# emd_causal: EMD verdadera con distancia de Hamming como métrica base
-def emd_causal(u, v):
-    n = u.size
-    cost_mat = get_hamming_matrix(n)   # matriz (2^N × 2^N) de distancias Hamming
-    return emd(u, v, cost_mat)         # PyEMD resuelve el problema de transporte
+# evaluar_bloques / evaluar_k_particion — O(N), exacta, para todo N
+dist_rec = subsistema.particionar(particiones).distribucion_marginal()
+return float(np.sum(np.abs(dist_original - dist_rec)))
 ```
 
-La función `emd_causal` calcula la **Earth Mover's Distance** real. La matriz de costos usa la
-**distancia de Hamming** entre estados binarios, que es la métrica correcta sobre el hipercubo
-booleano. El resultado es un Φ matemáticamente realista (típicamente > 1.0 para sistemas con
-integración causal real).
+```
+EMD_Hamming(P, Q) = Σᵢ | P(nodo_i = 1) − Q(nodo_i = 1) |   (teorema de descomposición marginal)
+```
+
+- **Más rápido:** O(N) en vez de O(4^N) del solver `pyemd`.
+- **Más preciso:** da el MISMO valor que la EMD real, sin límite de tamaño N.
+- `emd_causal`/`get_hamming_matrix` (la ruta `pyemd`) permanecen sólo como verificación
+  histórica; **no** están en el camino caliente.
 
 ---
 
-## 2. Generación de Candidatos — Hill-Climbing Ciego vs. Heurísticas Geométricas
+## 2. Cortes asimétricos + Greedy Top-Down (motor principal)
 
-### Original
-El código original seleccionaba biparticiones de forma pseudo-aleatoria (hill-climbing estocástico)
-sin información previa sobre qué cortes son más prometedores.
+### Original / versión intermedia
+Selección pseudo-aleatoria (hill-climbing ciego), o cortes **simétricos** donde el
+presente de cada bloque era `futuros ∩ dims` — sobre-cortaba e inflaba Φ para k ≥ 3.
 
 ### Actual
-Se generan candidatos a través de tres estrategias complementarias:
+Cada bloque es `Block = (frozenset futuros, frozenset presentes)`, con futuro y presente
+particionados de forma **independiente**. El motor:
 
-**a) Spectral Clustering con matriz de afinidad geométrica**
 ```
-A[i, j] = similitud_coseno(columna_i, columna_j) de la tabla de costos EMD
-         → normalizada a [0, 1]
-→ SpectralClustering(affinity="precomputed", n_clusters=k)
+_construir_cut_pool(...)   → O(N) cortes (3 familias por nodo), construido UNA vez
+_greedy_k_particion(...)   → desde 1 bloque, k-1 mejores splits del pool
+_refinar_bloques_1move(...) → 1-move futuro + 1-move presente (asimétrico)
+ILS (N_ILS=4)              → perturbar + re-refinar, conservar el mejor
 ```
-La afinidad mide cuán probabilísticamente similares son dos nodos bajo todas las condiciones.
-Nodos que "se comportan igual" en el espacio de probabilidades tienden a agruparse juntos.
 
-**b) Agglomerative Clustering (bottom-up)**
-Tres variantes de enlace: `average`, `complete`, `single`. Cada una produce candidatos con
-distintas estructuras de agrupamiento, cubriendo diferentes geometrías del espacio de particiones.
-
-**c) Aislamiento heurístico**
-Para k=2: N candidatos (cada nodo aislado vs. el resto).
-Para k=3: C(N, 2) candidatos (dos nodos individuales + residual). Etc.
-En la práctica, uno de estos candidatos reproduce el corte MIP exacto en la mayoría de los sistemas.
+Resultado: Φ coherente y mínimo real, idéntico a QNodes para todo k.
 
 ---
 
-## 3. Refinamiento Local — Ausente vs. 1-Move + ILS
+## 3. Refinamiento Local — Ausente vs. 1-Move Asimétrico + ILS
 
 ### Original
-No había fase de refinamiento. La primera partición encontrada era la solución final.
+Sin refinamiento: la primera partición era la final.
 
 ### Actual
-
-**Refinamiento 1-move:**
-```
-Para cada nodo n en bloque Bi:
-    Para cada bloque Bj (j ≠ i):
-        Mover n de Bi a Bj → evaluar nuevo Φ
-        Si Φ mejora → aceptar y repetir desde el principio
-Terminar cuando ningún movimiento mejore Φ
-```
-
-**Iterated Local Search (ILS):**
-Tras el refinamiento, se aplica una perturbación aleatoria (mover un nodo a un bloque distinto)
-y se refina de nuevo. Se repite N_ILS = 4 veces, conservando siempre el mejor resultado global.
-Este proceso escapa de mínimos locales superficiales.
+- **1-move futuro:** mover un nodo futuro entre bloques.
+- **1-move presente (asimétrico):** mover el mecanismo de un nodo sin tocar su futuro.
+- **ILS:** perturbación + re-refinamiento N_ILS = 4 veces, conservando el mejor Φ.
 
 ---
 
 ## 4. Soporte para k-Particiones (k > 2)
 
 ### Original
-Sólo soportaba biparticiones (k = 2). La generalización a más grupos no existía en la arquitectura.
+Sólo k = 2.
 
 ### Actual
-El método `System.particionar()` generaliza `bipartir()`:
+`System.particionar()` generaliza `bipartir()` y procesa todos los n-cubos en una sola
+pasada:
 
 ```python
-def particionar(self, particiones: list[tuple[alcance_i, mecanismo_i]]) -> System:
-    for cube in self.ncubos:
-        for alcance_i, mecanismo_i in particiones:
-            if cube.indice in alcance_i:
-                # Marginaliza sólo lo que NO pertenece al mecanismo de su grupo
-                cube.marginalizar(setdiff1d(cube.dims, mecanismo_i))
+dist_rec = subsistema.particionar(
+    [(futuros_i, presentes_i) for (futuros_i, presentes_i) in bloques]
+).distribucion_marginal()
 ```
 
-El bucle externo evalúa k = 2, 3, 4, 5 secuencialmente. Para cada k se usan todos los núcleos
-disponibles. Se reporta la k con el Φ mínimo global como la k-MIP.
+El bucle externo evalúa k secuencialmente (cada k con todos los núcleos vía joblib) y
+reporta la k de Φ mínimo global.
 
 ---
 
 ## 5. Manejo del Mecanismo Vacío (∅)
 
 ### Original
-Cuando una bipartición dejaba una parte sin variables en el presente, el sistema "destrozaba"
-las distribuciones y acumulaba penalizaciones artificiales (over-cutting), produciendo cortes
-inválidos con Φ inflado.
+Over-cutting con penalizaciones artificiales cuando una parte quedaba sin presente.
 
 ### Actual
-La función `_generar_candidatos_presente_vacio()` genera explícitamente variantes donde los
-nodos aislados usan **mecanismo vacío** (∅). Se marca con el centinela `-1` al inicio de la lista
-de la parte:
-
-```python
-partes = [[-1, a] for a in aislados] + [residual]
-#          ↑
-#      centinela ∅
-```
-
-`evaluar_k_particion` interpreta este centinela y usa `presentes_parte = np.array([], dtype=np.int8)`,
-lo que produce una distribución uniforme para ese subconjunto, sin penalización artificial.
+El pool incluye el corte `({i}, ∅)`: el futuro del nodo i se evalúa sin mecanismo
+presente, dejando que el resto conserve su causalidad. En el pipeline fallback se marca
+con el centinela `-1`. Sin penalización falsa.
 
 ---
 
 ## 6. Arquitectura — Imperativa vs. OOP con Clases de Dominio
 
-### Original
-Código imperativo genérico con funciones sueltas. El estado del sistema se pasaba como argumentos
-entre funciones sin encapsulamiento ni memoización.
+| Clase / Módulo | Responsabilidad |
+|---|---|
+| `System` | Condicionamiento, substracción, `bipartir`/`particionar`, marginales |
+| `NCube` | Hipercubo de probabilidad por nodo, marginalización cacheada |
+| `KGeoMIP` | Motor greedy top-down asimétrico (+ fallback heurístico) |
+| `Manager` | Carga de TPM, enrutamiento de estrategias |
+| `Solution` | Representación y visualización del resultado |
+| `LazyTPM` | Lectura lazy de TPM por chunks para N ≥ 18 |
 
-### Actual
-Arquitectura orientada a objetos con separación clara de responsabilidades:
-
-| Clase / Módulo       | Responsabilidad                                              |
-|----------------------|--------------------------------------------------------------|
-| `System`             | Condicionamiento, substracción, particionamiento, marginales |
-| `NCube`              | Hipercubo de probabilidad por nodo, marginalización cacheada |
-| `KGeoMIP`            | Algoritmo de búsqueda k-MIP completo                        |
-| `Manager`            | Carga de TPM, enrutamiento de estrategias                    |
-| `Solution`           | Representación y visualización del resultado                 |
-| `SafeLogger`         | Logging thread-safe con archivos por fecha                   |
-| `LazyTPM`            | Lectura lazy de TPM por chunks para N ≥ 18                  |
-
-La clase `NCube` implementa **memoización de marginalizaciones**:
-```python
-cache_key = frozenset(marginable_axis.tolist())
-if cache_key in self._marginal_cache:
-    return self._marginal_cache[cache_key]
-```
-Esto evita recomputar la misma marginalización decenas de veces durante el clustering.
+`NCube` memoiza marginalizaciones por `frozenset` de ejes (conmutatividad).
 
 ---
 
-## 7. Modo de Entrada — Excel Iterado vs. Terminal Interactivo + Modo Bloque CSV
+## 7. Modo de Entrada — Terminal Interactivo + Modo Bloque CSV
 
-### Original
-El código iteraba sobre un archivo Excel fijo como fuente de parámetros. No había interacción
-con el usuario en tiempo de ejecución.
+**Modo Manual:** TPM por diálogo de archivo, candidato, estado inicial, alcance,
+mecanismo y k por terminal.
 
-### Actual
-Dos modos independientes:
-
-**Modo Manual:** El usuario ingresa por terminal (o diálogo de archivo):
-1. Selecciona la TPM via explorador de archivos (`tkinter.filedialog`)
-2. Ingresa `sistema candidato` (máscara binaria)
-3. Ingresa `estado inicial` (o genera uno aleatorio)
-4. Ingresa `alcance` (t+1) y `mecanismo` (t)
-5. Ingresa K (o deja en blanco para evaluar todas)
-
-**Modo Bloque:** Carga un CSV con múltiples pruebas:
-```
-#Prueba,Alcance o Purview (t+1),Mecanismo(t)
-1,ABCDE,ABCDE
-2,ABCDE,ABCD
-```
-- Candidato y estado inicial se ingresan una sola vez para todo el lote
-- Las pruebas se ordenan automáticamente de menor a mayor complejidad
-- Se calienta la caché del sistema candidato y los pools de joblib antes de la primera prueba
-- Los resultados se exportan a `.xlsx` con formato profesional (color, wrap, freeze panes)
+**Modo Bloque:** CSV con múltiples pruebas; candidato y estado se ingresan una vez para
+todo el lote; las pruebas se ordenan de menor a mayor complejidad; resultados a `.xlsx`
+formateado / JSON.
 
 ---
 
 ## 8. Gestión de Memoria para N Grande — LazyTPM
 
-### Original
-La TPM se cargaba íntegramente en memoria. Para N = 20 esto representa 2²⁰ × 20 = ~20 millones
-de valores en float32 ≈ 80 MB mínimo, pero el procesamiento posterior multiplicaba ese requerimiento.
-
-### Actual
-Para N ≥ 18 se activa `LazyTPM`: la matriz no se carga nunca completa. En su lugar, un generador
-lee fragmentos (`chunks`) secuencialmente y calcula la marginal de cada columna acumulando:
-
-```python
-def marginal_nodo(self, idx: int) -> np.ndarray:
-    acum = np.zeros(2 ** self.n_nodos, dtype=np.float32)
-    for chunk_inicio, chunk_data in self.chunks():
-        acum[chunk_inicio : chunk_inicio + len(chunk_data)] = chunk_data[:, idx]
-    return acum
-```
-
-Esto permite procesar sistemas de hasta N = 25+ sin colapso de memoria.
+Para N ≥ 18 se activa `LazyTPM`: la matriz no se carga completa; un generador lee
+fragmentos (`chunks`) y acumula sólo las marginales necesarias, permitiendo N = 25+ sin
+colapso de memoria. Además `_construir_tabla_costos` avisa y estima memoria si n_dims > 20.
 
 ---
 
 ## Resumen de Cambios
 
-| Criterio                      | Original                          | Actual (GeoMIP AYDA 2026-1)                   |
-|-------------------------------|-----------------------------------|-----------------------------------------------|
-| Métrica EMD                   | Suma L1 simple (`emd_efecto`)     | EMD real con Hamming (`emd_causal`)           |
-| Valores de Φ                  | Artificialmente bajos             | Matemáticamente realistas                     |
-| Particiones soportadas        | Solo k = 2                        | k = 2 hasta min(6, N)                         |
-| Generación de candidatos      | Hill-climbing estocástico ciego   | Spectral + Agglomerative + Aislamiento        |
-| Refinamiento                  | Ninguno                           | 1-move + ILS                                  |
-| Mecanismo vacío (∅)           | Over-cutting sin control          | Soporte riguroso con centinela -1             |
-| Arquitectura                  | Funciones imperativas sueltas     | OOP: System, NCube, KGeoMIP, Manager         |
-| Memoización                   | Ninguna                           | NCube._marginal_cache por frozenset de ejes   |
-| Paralelismo                   | Ninguno / básico                  | joblib con cpu_count-1 núcleos               |
-| Entrada de datos              | Excel fijo                        | Terminal interactivo + CSV en modo bloque     |
-| Gestión de memoria            | Carga total en RAM                | LazyTPM por chunks para N ≥ 18               |
-| Exportación de resultados     | Excel manual                      | JSON (manual) y .xlsx formateado (bloque)    |
+| Criterio | Original | Actual (GeoMIP AYDA 2026-1) |
+|---|---|---|
+| Métrica EMD | L1 sin fundamento (`emd_efecto`) | **L1 = EMD Hamming EXACTA** (descomposición marginal) |
+| Costo por evaluación | — | O(N), sin límite de tamaño |
+| Particiones soportadas | Solo k = 2 | k = 2 hasta min(6, N) |
+| Representación | Listas simétricas | `Block = (frozenset futuros, frozenset presentes)` asimétrico |
+| Motor principal | Hill-climbing ciego | **Greedy top-down** + 1-move + ILS |
+| Generación de candidatos (fallback) | — | Spectral + Agglomerative + Aislamiento |
+| Refinamiento | Ninguno | 1-move futuro/presente + ILS |
+| Mecanismo vacío (∅) | Over-cutting | Corte `({i}, ∅)` riguroso |
+| Arquitectura | Funciones sueltas | OOP: System, NCube, KGeoMIP, Manager |
+| Paralelismo | Ninguno | joblib, cpu_count-1 núcleos por k |
+| Entrada | Excel fijo | Terminal interactivo + CSV en bloque |
+| Memoria | Carga total | LazyTPM por chunks para N ≥ 18 |

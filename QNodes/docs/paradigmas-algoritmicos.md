@@ -1,107 +1,108 @@
 # Paradigmas algorítmicos utilizados
 
 Este documento analiza cada paradigma algorítmico clásico, determina cuáles se
-utilizaron en `AYDA_2026_1/QNodes`, con qué justificación, y por qué los demás
-no resultaron aplicables o fueron descartados.
+utilizaron en `AYDA_2026_1/QNodes`, con qué justificación, y por qué los demás no
+resultaron aplicables.
 
 ---
 
 ## Paradigmas utilizados
 
-### 1. Algoritmo Voraz / Greedy (principal)
+### 1. Algoritmo Voraz / Greedy (principal — top-down)
 
-**Utilizado:** sí — en `QNodes._aglomerar` y `QNodes._refinamiento_local`
+**Utilizado:** sí — en `QNodes._greedy_descenso` / `_greedy_bloques` y `_mejor_split_bloques`
 
 **Descripción del uso:**
 
-El algoritmo greedy es el paradigma central de QNodes en ambas versiones del
-proyecto. En `AYDA_2026_1`, se implementa como agrupamiento jerárquico aglomerativo:
+El greedy es el paradigma central de QNodes, pero **top-down (divisivo)**, no
+aglomerativo. Se parte de un único bloque que cubre todo el subsistema (TODOS los
+futuros, TODOS los presentes) y en cada paso se aplica la **mejor división** de un
+bloque sobre todos los cortes del pool:
 
 ```
-En cada paso: elegir el par (Gᵢ, Gⱼ) cuya fusión minimiza _emd_particion
-Nunca deshacer decisiones tomadas.
+En cada paso: elegir (bloque b, corte c) cuya división minimiza _emd_bloques
+Nunca deshacer divisiones tomadas.
 ```
 
-La función de costo usada es submodular (la reducción de Phi al añadir un elemento
-decrece conforme el grupo crece), lo que hace que el greedy funcione bien en la
-práctica para este tipo de problemas.
+Un único descenso de k=1 a k=N produce una **jerarquía anidada**: cada k surge de
+dividir un bloque del nivel anterior, lo que garantiza Φ monótono no decreciente entre
+k consecutivos (coherencia, sin saltos).
 
-**Por qué greedy y no exhaustivo:** para N = 15, 20, 22, 25 la búsqueda exacta
-es computacionalmente intractable (véase sección de Branch & Bound). El greedy
-reduce la búsqueda a N³/6 evaluaciones de EMD, que es polinomial y tratable para
-cualquier N del proyecto.
+**Por qué greedy y no exhaustivo:** para N = 15, 20, 22, 25 la búsqueda exacta es
+intratable (B(N) super-exponencial). El greedy top-down hace O(N³) evaluaciones, que
+es polinomial y tratable para cualquier N del proyecto.
 
-**Garantía:** el greedy garantiza un **óptimo local de primer orden** (no se puede
-mejorar fusionando ningún par distinto en el último paso) pero no el óptimo global.
-Esta es la misma garantía que ofrecía la versión original del proyecto.
-
-**Fase 3 — candidatos de aislamiento (siempre activa):** para complementar el greedy
-se evalúan exhaustivamente los candidatos donde k-1 nodos están completamente
-aislados — el patrón de partición más frecuente en sistemas IIT. Para **k
-especificado** se evalúan C(N, k-1) candidatos. Para **k libre**, se evalúan los
-candidatos de aislamiento de *cada nivel k* del historial greedy (en total 2^N − 2
-evaluaciones), y se elige el k globalmente óptimo entre todos los niveles refinados.
-Esto hace que QNodes busque de forma completamente independiente, sin depender de
-GeoMIP para saber qué k explorar, para todo N.
+**Garantía:** óptimo local greedy en cada nivel (ninguna división distinta del último
+paso mejora), no el óptimo global; por eso se complementa con refinamiento e ILS.
 
 ---
 
-### 2. Heurístico (refinamiento local 1-move)
+### 2. Heurístico (refinamiento local 1-move asimétrico)
 
-**Utilizado:** sí — en `QNodes._refinamiento_local`
+**Utilizado:** sí — en `QNodes._refinar_bloques`
 
 **Descripción del uso:**
 
-El refinamiento local es una heurística de mejora iterativa que complementa el
-greedy aglomerativo. Después de que el agrupamiento produce una k-partición,
-se aplica búsqueda local 1-move hasta convergencia:
+Búsqueda local best-improvement hasta convergencia, con **dos** vecindarios:
 
 ```
-Repetir hasta que ningún movimiento mejore Phi:
-    Para cada nodo n ∈ Gᵢ (grupos con |Gᵢ| ≥ 2):
-        Para cada grupo destino Gⱼ (j ≠ i):
-            Si _emd_particion(candidato_con_movimiento) < phi_actual: aceptar
+Repetir hasta que ningún movimiento mejore Φ:
+    Movimiento futuro:   trasladar un nodo futuro del bloque i al j
+    Movimiento presente: trasladar el MECANISMO de un nodo del bloque i al j
+                         SIN mover su futuro  (exclusivo del esquema asimétrico)
 ```
 
-**Por qué es heurístico y no óptimo:** la búsqueda local 1-move garantiza un
-óptimo local 1-opt (no existe movimiento individual que mejore), pero no garantiza
-el óptimo 2-opt ni global. Es análogo al algoritmo de Lloyd (k-means) que tampoco
-garantiza el óptimo global.
-
-**Por qué se incluye:** el greedy aglomerativo comete errores tempranos que no
-puede corregir (una vez fusionados, los grupos no se separan). El 1-move permite
-redistribuir nodos entre grupos ya formados, compensando algunos de esos errores.
-En la práctica mejora la calidad de la solución con muy poco costo adicional,
-ya que la mayoría de las distribuciones ya están en caché.
+**Por qué se incluye:** el greedy top-down comete divisiones tempranas que no puede
+deshacer; el 1-move redistribuye futuros **y** mecanismos entre bloques ya formados.
+El movimiento presente abre un espacio de búsqueda imposible en representaciones
+simétricas, capturando mínimos de menor Φ. Garantiza óptimo local respecto a ambos
+vecindarios (no global).
 
 ---
 
-### 3. Programación Dinámica (memoización)
+### 3. Metaheurística (Búsqueda Local Iterada — ILS)
 
-**Utilizado:** sí — en el caché de distribuciones y costos
+**Utilizado:** sí — en `QNodes._refinar_con_ils` / `_perturbar_bloques`
 
 **Descripción del uso:**
 
-La memoización de `_dist_parte(mascara)` y `_costo_parte(mascara)` es un caso
-de programación dinámica top-down: se computan subproblemas (la distribución y el
-costo de cada subconjunto de nodos) exactamente una vez y se almacenan para reutilización.
+```
+Refinar (best-improvement) hasta converger
+Repetir n_ils veces:
+    Perturbar (mover nodos futuros/presentes al azar)
+    Re-refinar
+    Conservar el mejor Φ global
+```
+
+Los parámetros (`n_ils`, `max_iter`, intensidad de perturbación) son **N-adaptativos**:
+pocos ciclos de calidad para N grande, muchos para N pequeño. La ILS escapa de los
+mínimos locales superficiales del 1-move.
+
+---
+
+### 4. Programación Dinámica (memoización)
+
+**Utilizado:** sí — caché de distribuciones de bloque
+
+**Descripción del uso:**
+
+`_dist_bloque(fut_pos, pre_pos)` es DP top-down: la distribución marginal de cada
+bloque (la operación más cara, `bipartir().distribucion_marginal()`) se computa una
+sola vez y se almacena en `_cache_bloque`:
 
 ```python
-def _dist_parte(self, mascara: int) -> np.ndarray:
-    if mascara not in self._cache_dist:
-        self._cache_dist[mascara] = <cálculo costoso: bipartir + distribucion_marginal>
-    return self._cache_dist[mascara]
+def _dist_bloque(self, fut_pos, pre_pos):
+    clave = (fut_pos, pre_pos)
+    cache = self._cache_bloque.get(clave)
+    if cache is None:
+        cache = self.sia_subsistema.bipartir(...).distribucion_marginal()
+        self._cache_bloque[clave] = cache
+    return cache
 ```
 
-**Por qué top-down y no bottom-up:** un enfoque bottom-up precalcularía las
-distribuciones de los 2^N subconjuntos posibles antes de comenzar. Con el greedy,
-la mayoría de subconjuntos nunca se evalúan (solo los que aparecen como candidatos
-de fusión, de refinamiento o de aislamiento). La versión perezosa calcula solo lo
-necesario.
-
-**Diferencia con la versión anterior:** en `DynamicPartition`, la DP era el motor
-de búsqueda (recurrencia sobre particiones). En `QNodes`, la DP es solo soporte
-de memoización para el greedy — los roles son distintos.
+**Por qué top-down y no bottom-up:** con el greedy + refinamiento + ILS, sólo aparece
+un subconjunto pequeño de los 2^N bloques posibles. La versión perezosa paga sólo por
+lo que se computa. La clave es `(frozenset, frozenset)`: hashing barato y estable.
 
 ---
 
@@ -109,92 +110,61 @@ de memoización para el greedy — los roles son distintos.
 
 ### Branch & Bound (B&B)
 
-**¿Se utiliza?** No — fue el paradigma central de la versión anterior
-(`DynamicPartition`) y fue descartado en este reemplazo.
+**¿Se utiliza?** No.
 
-**Por qué se usaba antes:** en `DynamicPartition` el B&B podaba el árbol de
-búsqueda exhaustiva cuando el costo acumulado superaba la mejor solución conocida.
-Funcionaba bien para N ≤ 12 porque el número de Bell B(12) ≈ 4 millones es tratable.
-
-**Por qué se descartó para N ≤ 25:** incluso con poda del 90 %, B(15) × 0.1 ≈
-140 millones de evaluaciones y B(25) × 0.1 ≈ 4 × 10¹⁷ seguirían siendo intractables.
-La poda no es suficiente para salvar la búsqueda exhaustiva a estos tamaños.
-El greedy aglomerativo hace O(N³) evaluaciones independientemente de la cota,
-lo que lo hace superior en el rango N = 15–25.
+**Por qué:** incluso con poda del 90 %, B(15)×0.1 ≈ 140 millones y B(25)×0.1 ≈ 4×10¹⁷
+seguirían siendo intratables. La poda no salva la búsqueda exhaustiva a estos tamaños.
+El greedy top-down hace O(N³) evaluaciones independientemente de la cota.
 
 ---
 
 ### Backtracking puro
 
-**¿Se utiliza?** No.
-
-**Por qué no:** el backtracking puro sin memoización ni poda exploraría B(N) ramas
-con recomputaciones repetidas. Es estrictamente dominado por B&B, y B&B ya es
-intractable para N ≥ 15. No aporta nada sobre el greedy en este contexto.
+**¿Se utiliza?** No. Sin memoización ni poda exploraría B(N) ramas con recomputaciones.
+Estrictamente dominado por B&B, que ya es intratable para N ≥ 15.
 
 ---
 
 ### Búsqueda exhaustiva (fuerza bruta)
 
-**¿Se utiliza?** No en QNodes, pero existe como estrategia separada (`BruteForce`).
-
-**Por qué existe en paralelo pero no en QNodes:** `BruteForce` sirve como ground
-truth para sistemas pequeños (N ≤ 10). QNodes es la estrategia para sistemas grandes.
-La co-existencia permite validar la calidad del greedy comparando ambas salidas en
-sistemas donde la fuerza bruta es tratable.
+**¿Se utiliza?** No en QNodes, pero existe como estrategia separada (`BruteForce`) como
+ground truth para N ≤ 10, para validar la calidad del greedy.
 
 ---
 
-### Algoritmos metaheurísticos (simulated annealing, algoritmos genéticos)
+### Algoritmos genéticos / Simulated Annealing
 
-**¿Se utilizan?** No.
-
-**Por qué no:**
-1. El greedy + 1-move ya provee una solución de calidad razonable en tiempo polinomial.
-2. Los metaheurísticos requieren definir operadores de vecindad y parámetros de
-   enfriamiento/mutación que son dependientes del problema y difíciles de tunear.
-3. La función objetivo (EMD sobre distribuciones de la TPM) no tiene gradiente
-   aprovechable, lo que quita ventaja a métodos como gradiente estocástico.
-4. En el contexto académico del proyecto, la claridad del greedy aglomerativo
-   (análogo a clustering jerárquico, bien estudiado en la literatura) supera en
-   valor pedagógico a un metaheurístico de caja negra.
+**¿Se utilizan?** No. La ILS ya provee escape de mínimos locales con operadores simples
+(movimientos futuro/presente). La función objetivo (EMD sobre la TPM) no tiene
+gradiente aprovechable, y la claridad del greedy + ILS supera en valor pedagógico a un
+metaheurístico de caja negra con parámetros difíciles de tunear.
 
 ---
 
 ### Programación lineal / ILP
 
-**¿Se utiliza?** No.
-
-**Por qué no:** formular la k-MIP como ILP requiere modelar la función objetivo
-(EMD de distribuciones marginales de subconjuntos de la TPM) como restricciones
-lineales enteras. Esta función no tiene una forma lineal natural en términos de
-las variables de decisión binarias de la partición, lo que hace la formulación
-intractable o imprecisa. Además, el overhead de solvers ILP para problemas pequeños
-(N ≤ 25) es mayor que el del greedy directo.
+**¿Se utiliza?** No. La EMD de distribuciones marginales de subconjuntos de la TPM no
+tiene forma lineal natural en las variables binarias de la partición; la formulación
+sería intratable o imprecisa, y el overhead de un solver superaría al greedy directo.
 
 ---
 
 ### Divide y vencerás
 
-**¿Se utiliza?** No.
-
-**Por qué no:** divide y vencerás requiere que el problema se pueda descomponer en
-subproblemas independientes que se combinan en tiempo polinomial. En la k-MIP, las
-distribuciones marginales de cada parte dependen de la TPM del sistema completo
-(no de subsistemas independientes), por lo que no existe una descomposición natural
-que permita combinar sub-soluciones con garantía de optimalidad global.
+**¿Se utiliza?** No como esquema de combinación de sub-soluciones. Aunque el greedy es
+top-down, las distribuciones marginales de cada bloque dependen de la TPM del sistema
+completo, por lo que no hay descomposición en subproblemas independientes con garantía
+de optimalidad global.
 
 ---
 
 ### Clustering espectral / métodos geométricos
 
-**¿Se utilizan?** No en QNodes — son el dominio de GeoMIP (el otro framework del proyecto).
-
-**Por qué en GeoMIP y no en QNodes:** GeoMIP usa afinidades geométricas y matrices
-de similitud para guiar la búsqueda, lo que es efectivo para sistemas con estructura
-topológica clara. QNodes preserva su lógica original de función submodular sobre EMD
-directamente, sin pasar por representaciones espectrales. La separación de enfoques
-es intencional: permite comparar qué filosofía funciona mejor en distintos sistemas.
+**¿Se utilizan?** No en QNodes — son el dominio de GeoMIP. La separación es intencional:
+QNodes trabaja directamente sobre cortes asimétricos y EMD; GeoMIP usa afinidades
+geométricas. Permite comparar qué filosofía funciona mejor. (Nota: GeoMIP también
+adoptó el mismo motor greedy top-down asimétrico como ruta principal; el clustering
+espectral quedó como fallback.)
 
 ---
 
@@ -202,13 +172,14 @@ es intencional: permite comparar qué filosofía funciona mejor en distintos sis
 
 | Paradigma | Estado | Justificación |
 |---|---|---|
-| Greedy (aglomerativo + aislamiento) | **Utilizado — principal** | O(N³) + 2^N candidatos para k libre; aplica para todo N |
-| Heurístico (1-move local) | **Utilizado — refinamiento** | Mejora calidad post-greedy sin costo significativo |
-| Programación Dinámica (memoización) | **Utilizado — soporte** | Evita recalcular distribuciones, costos y matrices Hamming |
-| Branch & Bound | **No** | Intractable para N≥15 aunque con poda del 90% |
-| Backtracking puro | **No** | Dominado por B&B, y B&B ya es intractable |
-| Búsqueda exhaustiva | **Solo en BruteForce** | Ground truth para N≤10 como validación |
-| Metaheurísticas | **No** | Sin gradiente, sin ventaja sobre greedy; menos pedagógico |
-| ILP / programación lineal | **No** | Objetivo no linealizable de forma natural |
-| Divide y vencerás | **No** | Subproblemas no independientes entre sí |
-| Clustering espectral | **No (ver GeoMIP)** | Filosófica y arquitecturalmente en el otro framework |
+| Greedy top-down (divisivo) | **Utilizado — principal** | O(N³); un descenso = jerarquía anidada de todos los k |
+| Heurístico (1-move futuro + presente) | **Utilizado — refinamiento** | Mejora post-greedy; movimiento presente exclusivo del esquema asimétrico |
+| Metaheurística (ILS) | **Utilizado — escape de mínimos** | Perturbación + re-refinamiento N-adaptativo |
+| Programación Dinámica (memoización) | **Utilizado — soporte** | `_cache_bloque` evita recalcular distribuciones |
+| Branch & Bound | **No** | Intratable para N ≥ 15 aun con poda |
+| Backtracking puro | **No** | Dominado por B&B |
+| Búsqueda exhaustiva | **Solo en BruteForce** | Ground truth para N ≤ 10 |
+| Genéticos / SA | **No** | Sin ventaja sobre ILS; menos pedagógico |
+| ILP | **No** | Objetivo no linealizable |
+| Divide y vencerás | **No** | Subproblemas no independientes |
+| Clustering espectral | **No (ver GeoMIP)** | Otro framework |

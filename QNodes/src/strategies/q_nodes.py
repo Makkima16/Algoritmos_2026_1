@@ -1,43 +1,63 @@
 """
-QNodes — k-MIP heurístico mediante agrupamiento jerárquico aglomerativo.
+QNodes — k-MIP heurístico mediante cortes ASIMÉTRICOS y greedy top-down.
 
 El problema k-MIP (Partición de Mínima Información) requiere dividir un sistema
-de N nodos en k subconjuntos disjuntos minimizando la pérdida de información
-integrada Phi (Φ). La búsqueda exhaustiva sobre B(N) particiones es intractable
-para N ≥ 15 (números de Bell), por lo que QNodes usa una estrategia greedy O(N³).
+de N nodos en k subconjuntos minimizando la pérdida de información integrada
+Phi (Φ). La búsqueda exhaustiva sobre B(N) particiones es intratable para
+N ≥ 15, por lo que QNodes usa una estrategia greedy con refinamiento local.
 
-Algoritmo principal — tres fases para todo N
-─────────────────────────────────────────────
-1. Agrupamiento aglomerativo greedy (siempre O(N³)):
-   - Inicializar N singletons {nodo_i} para i ∈ [0, N).
-   - Repetir hasta tener 2 grupos:
-       a. Evaluar todos los C(k,2) pares candidatos con _emd_particion.
-       b. Fusionar el par con menor Phi resultante.
-       c. Registrar historico[k] = (phi, grupos) para cada nivel k.
-   - Retornar historial completo {k: (phi, grupos)} para k ∈ [2, N].
+Representación ASIMÉTRICA de bloques (clave para coherencia entre k)
+───────────────────────────────────────────────────────────────────
+Cada bloque es un par (futuros, presentes) de posiciones locales que se
+particionan de forma INDEPENDIENTE:
 
-2. Refinamiento local 1-move (siempre):
-   - Para cada nodo en cada grupo, evaluar moverlo a otro grupo con _emd_particion.
-   - Aceptar si mejora Phi. Repetir hasta convergencia (máx. 20 pasadas).
+  • futuros  (t+1): el alcance/efecto que el bloque produce.
+  • presentes (t):  el mecanismo/causa que el bloque conserva como condicionante.
 
-3. Candidatos de aislamiento (siempre, para cada k evaluado):
-   - Generar C(N, k-1) candidatos con k-1 nodos individualmente aislados.
-   - Si alguno supera la solución greedy+refinamiento, adoptarlo y refinar de nuevo.
+A diferencia de un corte SIMÉTRICO (donde el presente de un bloque es siempre
+futuros ∩ dims, es decir cada grupo solo condiciona sobre sus propios nodos),
+el corte asimétrico permite que un nodo aislado en su futuro siga actuando como
+condicionante causal de otro bloque. Esto replica exactamente la lógica de
+GeoMIP y evita el "sobre-corte" que infla Φ.
 
-Para k libre (k=None): las tres fases se aplican a CADA nivel k del historial
-y se elige el k ∈ [3, N] con menor Phi global.
+Motivación (medido en N10A, estado=1000…0):
+  - Corte simétrico:  k=2 → 0.4746, k=3 → 2.5059  (salto incoherente)
+  - Corte asimétrico: k=2 → 0.4746, k=3 → 0.9590  (monótono, coherente)
 
-Métrica EMD:
-   _emd_particion usa internamente la métrica más precisa que el tamaño permite:
-   N ≤ HAMMING_EMD_MAX_N → Wasserstein-1 con d_Hamming sobre el espacio 2^N (exacta).
-   N > HAMMING_EMD_MAX_N → suma L1 marginal (aproximación rápida y tratable).
-   Este detalle de implementación es transparente para la estrategia.
+El caso k=2 asimétrico — aislar Xi con mecanismo ∅ y dejar al residual con TODOS
+los presentes — ya reproducía el Φ de GeoMIP; aquí se generaliza a todo k.
+
+Algoritmo
+─────────
+1. Pool de cortes O(N): por cada nodo i se generan
+     ({i}, {pre_i})          aislamiento simétrico,
+     (resto, resto_pre)      su complemento,
+     ({i}, ∅)                aislamiento con mecanismo vacío (corte GeoMIP).
+2. Greedy top-down: se parte del bloque único (TODOS los futuros, TODOS los
+   presentes) y se aplican k-1 mejores divisiones usando el pool. Un solo
+   descenso registra Φ para CADA k (jerarquía nido → coherencia garantizada).
+3. Refinamiento local best-improvement sobre bloques:
+     - movimiento futuro:  reubica un nodo futuro entre bloques,
+     - movimiento presente (asimétrico): reubica el mecanismo de un nodo sin
+       mover su futuro — imposible en representaciones simétricas.
+4. ILS — Búsqueda Local Iterada: perturba y re-refina el k ganador.
+
+Métrica EMD (suma L1 marginal — EXACTA, no aproximada):
+   La reconstrucción de toda k-partición es un producto de marginales por nodo
+   (independencia condicional garantizada por construcción), y la distribución
+   original se modela igual. Para DOS distribuciones producto con métrica base
+   de Hamming, la Wasserstein-1 (EMD real) coincide EXACTAMENTE con la suma de
+   diferencias L1 marginales, porque la distancia de Hamming es separable por
+   coordenada y el acoplamiento óptimo factoriza. Verificado numéricamente:
+   |emd_causal − L1| < 1e-14 para N=2..12. Por tanto se usa L1 directo, que es
+   O(N) en lugar de O(4^N) del pyemd, dando el MISMO Φ (p.ej. k=2 N10A = 0.4746,
+   idéntico a GeoMIP) sin restricción de tamaño en N.
 
 Memoización:
-  • _cache_dist[mascara]:  distribución marginal de la parte 'mascara'.
-  • _cache_costo[mascara]: costo L1 de 'mascara' (para decisión de mecanismo vacío).
-  Ambos cachés se limpian entre ejecuciones independientes.
+  • _cache_bloque[(futuros, presentes)]: distribución marginal del bloque.
+  Los cachés se limpian entre ejecuciones independientes.
 """
+import random as _random_module
 import time
 from typing import Generator, Optional
 
@@ -45,8 +65,8 @@ import numpy as np
 
 from src.middlewares.slogger import SafeLogger
 from src.middlewares.profile import gestor_perfilado, profile
-from src.funcs.format import fmt_k_particion_dp
-from src.funcs.iit import distribucion_conjunta_vectorizada, emd_causal, HAMMING_EMD_MAX_N
+from src.funcs.format import fmt_k_bloques
+from src.funcs.iit import HAMMING_EMD_MAX_N
 from src.models.base.sia import SIA
 from src.models.core.solution import Solution
 from src.constants.models import (
@@ -60,6 +80,16 @@ from src.models.base.application import aplicacion
 
 PERMITIR_PRESENTE_VACIO_POR_DEFECTO: bool = False
 
+# Iteraciones base de Búsqueda Local Iterada (escala según N en _refinar_con_ils).
+_N_ILS: int = 4
+
+# Iteraciones de refinamiento por nivel en k=None (el ILS final refina el ganador).
+_MAX_ITER_NIVEL: int = 5
+
+
+# Un bloque asimétrico: (frozenset futuros_pos, frozenset presentes_pos).
+Bloque = "tuple[frozenset, frozenset]"
+
 
 def _bits_activos(mascara: int) -> Generator[int, None, None]:
     """Genera los índices de bits activos de `mascara` en orden ascendente."""
@@ -72,20 +102,16 @@ def _bits_activos(mascara: int) -> Generator[int, None, None]:
 
 class QNodes(SIA):
     """
-    Estrategia QNodes para k-MIP mediante agrupamiento jerárquico aglomerativo.
+    Estrategia QNodes para k-MIP mediante cortes asimétricos y greedy top-down.
 
-    Aplica tres fases para todo N: agrupamiento greedy O(N³), refinamiento local
-    1-move y candidatos de aislamiento C(N, k-1). Para k libre, las tres fases se
-    ejecutan sobre cada nivel k del historial y se elige el k con menor Phi global.
-
-    La métrica usada en _emd_particion es Hamming EMD (N ≤ HAMMING_EMD_MAX_N) o
-    L1 marginal (N > HAMMING_EMD_MAX_N), de forma transparente para la estrategia.
+    Cada bloque mantiene futuros y presentes independientes, lo que permite
+    cortes asimétricos coherentes para todo k (ver docstring del módulo). El
+    greedy top-down construye una jerarquía nido (un Φ por cada k en un solo
+    descenso) que luego se refina con búsqueda local best-improvement (1-move
+    futuro + 1-move presente) e ILS.
 
     Attrs:
-        _cache_dist      : mascara → distribución marginal normal.
-        _cache_dist_vacio: mascara → distribución marginal con presentes = ∅.
-        _cache_costo     : mascara → costo L1 de esa parte (para decisión de ∅).
-        _usar_vacio      : mascara → True si la variante vacía dio menor costo.
+        _cache_bloque : (futuros, presentes) → distribución marginal del bloque.
     """
 
     def __init__(self, tpm: np.ndarray):
@@ -93,13 +119,13 @@ class QNodes(SIA):
         gestor_perfilado.start_session(
             f"{NET_LABEL}{len(tpm[COLS_IDX])}{aplicacion.pagina_red_muestra}"
         )
-        self._cache_dist: dict[int, np.ndarray] = {}
-        self._cache_costo: dict[int, float] = {}
         self._N: int = 0
+        self._n_dims: int = 0
         self.logger = SafeLogger(QNODES_STRAREGY_TAG)
         self._permitir_presente_vacio: bool = False
-        self._cache_dist_vacio: dict[int, np.ndarray] = {}
-        self._usar_vacio: dict[int, bool] = {}
+        self._cache_bloque: dict[tuple, np.ndarray] = {}
+        self._idx: np.ndarray = np.array([], dtype=np.int8)
+        self._dims: np.ndarray = np.array([], dtype=np.int8)
 
     @profile(context={TYPE_TAG: QNODES_ANALYSIS_TAG})
     def aplicar_estrategia(
@@ -114,13 +140,13 @@ class QNodes(SIA):
         self._permitir_presente_vacio = permitir_presente_vacio
         self.sia_preparar_subsistema(estado_inicial, condicion, alcance, mecanismo)
 
-        self._N = len(self.sia_subsistema.indices_ncubos)
+        self._idx = self.sia_subsistema.indices_ncubos
+        self._dims = self.sia_subsistema.dims_ncubos
+        self._N = len(self._idx)
+        self._n_dims = len(self._dims)
 
-        # Limpiar cachés entre ejecuciones
-        self._cache_dist.clear()
-        self._cache_costo.clear()
-        self._cache_dist_vacio.clear()
-        self._usar_vacio.clear()
+        # Limpiar caché entre ejecuciones independientes
+        self._cache_bloque.clear()
 
         if self._N < 2:
             dist_trivial = self.sia_dists_marginales.copy()
@@ -136,64 +162,44 @@ class QNodes(SIA):
         if k is not None and (k < 2 or k > self._N):
             raise ValueError(f"k={k} fuera del rango permitido [2, {self._N}]")
 
-        # Fase 1: agrupamiento aglomerativo — retorna la jerarquía completa {k: (phi, grupos)}
-        historico = self._aglomerar()
+        pool = self._construir_pool_cortes()
 
         if k is not None:
-            # k especificado: tomar ese nivel, refinar y evaluar candidatos de aislamiento
-            if k not in historico:
-                raise ValueError(f"k={k} no alcanzable con N={self._N}")
-            mejor_phi, mejor_grupos = historico[k]
-
-            # Fase 2: refinamiento local 1-move
-            mejor_phi, mejor_grupos = self._refinamiento_local(mejor_grupos, mejor_phi)
-
-            # Fase 3: candidatos de aislamiento para el k dado
-            for candidato_grupos in self._candidatos_aislamiento(k):
-                phi_cand = self._emd_particion(candidato_grupos)
-                if phi_cand < mejor_phi - 1e-10:
-                    mejor_phi = phi_cand
-                    mejor_grupos = candidato_grupos
-            mejor_phi, mejor_grupos = self._refinamiento_local(mejor_grupos, mejor_phi)
-
+            # k especificado: greedy hasta k, refinamiento local, ILS final.
+            mejor_phi, mejor_bloques = self._greedy_bloques(pool, k)
+            mejor_phi, mejor_bloques = self._refinar_bloques(mejor_bloques, mejor_phi)
+            mejor_phi, mejor_bloques = self._refinar_con_ils(mejor_bloques, mejor_phi)
         else:
-            # k libre: las tres fases se aplican a CADA nivel k del historial.
-            # Se elige el k ∈ [3, N] con menor Phi entre todos los niveles refinados.
-            historico_refinado: dict[int, tuple[float, list[int]]] = {}
-            for k_nivel, (phi_nivel, grupos_nivel) in historico.items():
-                phi_r, grupos_r = self._refinamiento_local(grupos_nivel, phi_nivel)
-                # candidatos de aislamiento para este nivel (k=N son triviales, se omiten)
-                if k_nivel < self._N:
-                    for candidato_grupos in self._candidatos_aislamiento(k_nivel):
-                        phi_cand = self._emd_particion(candidato_grupos)
-                        if phi_cand < phi_r - 1e-10:
-                            phi_r = phi_cand
-                            grupos_r = candidato_grupos
-                    phi_r, grupos_r = self._refinamiento_local(grupos_r, phi_r)
-                historico_refinado[k_nivel] = (phi_r, grupos_r)
+            # k libre: descenso greedy completo (un Φ por cada k), refinamiento
+            # ligero por nivel, y se elige el k ≥ 3 con menor Φ para el ILS final.
+            historico = self._greedy_descenso(pool)
 
-            candidatos_k3 = {
-                kk: ph for kk, (ph, _) in historico_refinado.items() if kk >= 3
-            }
+            historico_refinado: dict[int, tuple[float, list]] = {}
+            for k_nivel, (phi_nivel, bloques_nivel) in historico.items():
+                if k_nivel < 2:
+                    continue
+                phi_r, bloques_r = self._refinar_bloques(
+                    bloques_nivel, phi_nivel, max_iter=_MAX_ITER_NIVEL
+                )
+                historico_refinado[k_nivel] = (phi_r, bloques_r)
+
+            candidatos_k3 = {kk: ph for kk, (ph, _) in historico_refinado.items() if kk >= 3}
             if not candidatos_k3:
                 candidatos_k3 = {kk: ph for kk, (ph, _) in historico_refinado.items()}
             mejor_k = min(candidatos_k3, key=candidatos_k3.get)
-            mejor_phi, mejor_grupos = historico_refinado[mejor_k]
+            mejor_phi, mejor_bloques = historico_refinado[mejor_k]
+            mejor_phi, mejor_bloques = self._refinar_con_ils(mejor_bloques, mejor_phi)
 
-        # Reconstruir distribución de la partición óptima
+        # Reconstrucción de la distribución de la partición óptima.
         dist_reconstruida = np.empty(self._N, dtype=np.float32)
-        for mascara in mejor_grupos:
-            dist_parte = self._dist_parte_efectiva(mascara)
-            for i in _bits_activos(mascara):
-                dist_reconstruida[i] = float(dist_parte[i])
+        for fut_pos, pre_pos in mejor_bloques:
+            if not fut_pos:
+                continue
+            dist_bloque = self._dist_bloque(fut_pos, pre_pos)
+            for p in fut_pos:
+                dist_reconstruida[p] = float(dist_bloque[p])
 
-        mascaras_vacio = {m for m in mejor_grupos if self._usar_vacio.get(m, False)}
-        fmt_mip = fmt_k_particion_dp(
-            mejor_grupos,
-            self.sia_subsistema.indices_ncubos,
-            self.sia_subsistema.dims_ncubos,
-            mascaras_vacio,
-        )
+        fmt_mip = fmt_k_bloques(mejor_bloques, self._idx, self._dims)
 
         return Solution(
             estrategia=QNODES_LABEL,
@@ -204,235 +210,311 @@ class QNodes(SIA):
             particion=fmt_mip,
         )
 
-    # ── Agrupamiento aglomerativo greedy ───────────────────────────────────
+    # ── Pool de cortes asimétricos ─────────────────────────────────────────
 
-    def _aglomerar(self) -> dict[int, tuple[float, list[int]]]:
+    def _construir_pool_cortes(self) -> "list[tuple[frozenset, frozenset]]":
         """
-        Construye la jerarquía completa de k-particiones fusionando de N hasta 2.
+        Construye el pool de cortes candidatos a partir de la estructura por nodo.
 
-        Siempre evalúa cada fusión candidata con _emd_particion (que internamente
-        usa Hamming EMD o L1 según N). Retorna el historial completo:
-        {k: (phi, grupos)} para k ∈ [2, N].
+        Tres familias por cada nodo i (posición local):
+          1. ({i}, {pre_i})            aislamiento simétrico (futuro+su mecanismo).
+          2. (resto, resto_pre)        su complemento.
+          3. ({i}, ∅)                  aislamiento con mecanismo vacío (corte GeoMIP):
+             al aplicarse a un bloque B produce inside=({i}, ∅) y outside con el
+             mecanismo de i intacto — i sigue condicionando causalmente al resto.
+
+        Para K=2 una de estas familias reproduce el corte MIP exacto en la
+        práctica totalidad de los casos; para K≥3 el greedy las encadena y el
+        refinamiento las pule.
         """
-        grupos: list[int] = [1 << i for i in range(self._N)]
+        all_fut = frozenset(range(self._N))
+        all_pre = frozenset(range(self._n_dims))
+        pool: list = []
+        vistos: set = set()
 
-        # Pre-poblar caché de distribuciones para todos los singletons
-        for g in grupos:
-            self._dist_parte(g)
-        phi_total = self._emd_particion(grupos)
+        def _add(eff: frozenset, pre: frozenset) -> None:
+            if not eff:
+                return
+            clave = (eff, pre)
+            if clave not in vistos:
+                vistos.add(clave)
+                pool.append(clave)
 
-        historico: dict[int, tuple[float, list[int]]] = {
-            self._N: (phi_total, list(grupos))
-        }
+        for i in range(self._N):
+            eff = frozenset((i,))
+            pre = frozenset((i,)) if i < self._n_dims else frozenset()
+            _add(eff, pre)
+            _add(all_fut - eff, all_pre - pre)
+            _add(eff, frozenset())  # corte de mecanismo vacío
 
-        while len(grupos) > 2:
-            mejor_phi_merge = float("inf")
-            mejor_i = mejor_j = -1
+        return pool
 
-            n_grupos = len(grupos)
-            for i in range(n_grupos):
-                for j in range(i + 1, n_grupos):
-                    union = grupos[i] | grupos[j]
-                    candidato = [
-                        g for idx, g in enumerate(grupos)
-                        if idx != i and idx != j
-                    ] + [union]
-                    phi_cand = self._emd_particion(candidato)
-                    if phi_cand < mejor_phi_merge:
-                        mejor_phi_merge = phi_cand
-                        mejor_i, mejor_j = i, j
+    # ── Greedy top-down sobre bloques asimétricos ──────────────────────────
 
-            gi, gj = grupos[mejor_i], grupos[mejor_j]
-            union = gi | gj
-            grupos = [
-                g for idx, g in enumerate(grupos)
-                if idx != mejor_i and idx != mejor_j
-            ]
-            grupos.append(union)
-            phi_total = mejor_phi_merge
-            historico[len(grupos)] = (phi_total, list(grupos))
+    def _mejor_split_bloques(
+        self,
+        bloques: "list[tuple[frozenset, frozenset]]",
+        pool: "list[tuple[frozenset, frozenset]]",
+    ) -> "Optional[tuple[float, list]]":
+        """
+        Halla la mejor división de un único bloque sobre todas las (bloque, corte).
 
+        Para cada bloque b y cada corte c calcula:
+            inside  = (b.fut ∩ c.fut, b.pre ∩ c.pre)
+            outside = (b.fut − c.fut, b.pre − c.pre)
+        Se exige que AMBOS lados conserven al menos un futuro (partición limpia
+        de los N nodos futuros); el presente puede quedar asimétrico o vacío.
+        """
+        mejor: list | None = None
+        mejor_phi = float("inf")
+
+        for pos, (eff_b, pre_b) in enumerate(bloques):
+            if len(eff_b) <= 1 and len(pre_b) == 0:
+                continue
+            for cut_eff, cut_pre in pool:
+                in_eff = eff_b & cut_eff
+                out_eff = eff_b - cut_eff
+                if not in_eff or not out_eff:
+                    continue  # cada bloque debe conservar ≥1 futuro
+                inside = (in_eff, pre_b & cut_pre)
+                outside = (out_eff, pre_b - cut_pre)
+                cfg = bloques[:pos] + [inside, outside] + bloques[pos + 1:]
+                phi = self._emd_bloques(cfg)
+                if phi < mejor_phi:
+                    mejor_phi = phi
+                    mejor = cfg
+
+        if mejor is None:
+            return None
+        return mejor_phi, mejor
+
+    def _greedy_bloques(
+        self,
+        pool: "list[tuple[frozenset, frozenset]]",
+        k: int,
+    ) -> "tuple[float, list]":
+        """Greedy top-down deteniéndose al alcanzar k bloques."""
+        bloques: list = [(frozenset(range(self._N)), frozenset(range(self._n_dims)))]
+        phi = self._emd_bloques(bloques)
+        while len(bloques) < k:
+            resultado = self._mejor_split_bloques(bloques, pool)
+            if resultado is None:
+                break
+            phi, bloques = resultado
+        return phi, bloques
+
+    def _greedy_descenso(
+        self,
+        pool: "list[tuple[frozenset, frozenset]]",
+    ) -> "dict[int, tuple[float, list]]":
+        """
+        Descenso greedy completo de k=1 a k=N registrando Φ en cada nivel.
+
+        Un único descenso produce una jerarquía NIDO: cada k surge de dividir
+        un bloque del nivel anterior, lo que garantiza coherencia (Φ monótono
+        no decreciente) entre k consecutivos.
+        """
+        bloques: list = [(frozenset(range(self._N)), frozenset(range(self._n_dims)))]
+        historico: dict[int, tuple[float, list]] = {1: (self._emd_bloques(bloques), list(bloques))}
+        while len(bloques) < self._N:
+            resultado = self._mejor_split_bloques(bloques, pool)
+            if resultado is None:
+                break
+            phi, bloques = resultado
+            historico[len(bloques)] = (phi, list(bloques))
         return historico
 
-    # ── Refinamiento local 1-move ───────────────────────────────────────────
+    # ── Refinamiento local best-improvement (1-move futuro + presente) ─────
 
-    def _refinamiento_local(
+    def _refinar_bloques(
         self,
-        grupos: list[int],
-        phi_total: float,
+        bloques: "list[tuple[frozenset, frozenset]]",
+        phi: float,
         max_iter: int = 20,
-    ) -> tuple[float, list[int]]:
+    ) -> "tuple[float, list]":
         """
-        Refinamiento post-agrupamiento: prueba mover un nodo a otro grupo.
+        Refinamiento best-improvement sobre bloques asimétricos.
 
-        Evalúa cada movimiento candidato con _emd_particion. Acepta si mejora
-        Phi. Repite hasta convergencia (máximo max_iter pasadas).
-        Garantiza un óptimo local 1-move: ningún traslado individual mejora Phi.
+        En cada ronda evalúa TODOS los vecinos y aplica el globalmente mejor:
+          - movimiento futuro:  traslada un nodo futuro del bloque i al j.
+          - movimiento presente: traslada el mecanismo de un nodo del bloque i
+            al j SIN mover su futuro (exclusivo del esquema asimétrico).
+        Repite hasta convergencia o max_iter rondas.
         """
-        grupos = list(grupos)
+        bloques = [(frozenset(e), frozenset(p)) for e, p in bloques]
 
         for _ in range(max_iter):
-            mejorado = False
+            mejor: list | None = None
+            mejor_phi = phi
+            k = len(bloques)
 
-            for idx_origen in range(len(grupos)):
-                g_origen = grupos[idx_origen]
-
-                if bin(g_origen).count("1") <= 1:
-                    continue
-
-                for bit_nodo in list(_bits_activos(g_origen)):
-                    mascara_nodo = 1 << bit_nodo
-                    g_sin_nodo = g_origen ^ mascara_nodo
-
-                    for idx_dest in range(len(grupos)):
-                        if idx_dest == idx_origen:
+            # Movimientos futuros
+            for i, (eff_i, pre_i) in enumerate(bloques):
+                if len(eff_i) <= 1:
+                    continue  # no vaciar el futuro de un bloque
+                for nodo in eff_i:
+                    for j in range(k):
+                        if i == j:
                             continue
+                        eff_j, pre_j = bloques[j]
+                        cfg = list(bloques)
+                        cfg[i] = (eff_i - {nodo}, pre_i)
+                        cfg[j] = (eff_j | {nodo}, pre_j)
+                        phi_cand = self._emd_bloques(cfg)
+                        if phi_cand < mejor_phi - 1e-10:
+                            mejor_phi = phi_cand
+                            mejor = cfg
 
-                        g_dest = grupos[idx_dest]
-                        g_con_nodo = g_dest | mascara_nodo
+            # Movimientos presentes (asimétrico)
+            for i, (eff_i, pre_i) in enumerate(bloques):
+                for nodo in pre_i:
+                    for j in range(k):
+                        if i == j:
+                            continue
+                        eff_j, pre_j = bloques[j]
+                        cfg = list(bloques)
+                        cfg[i] = (eff_i, pre_i - {nodo})
+                        cfg[j] = (eff_j, pre_j | {nodo})
+                        phi_cand = self._emd_bloques(cfg)
+                        if phi_cand < mejor_phi - 1e-10:
+                            mejor_phi = phi_cand
+                            mejor = cfg
 
-                        candidato = list(grupos)
-                        candidato[idx_origen] = g_sin_nodo
-                        candidato[idx_dest] = g_con_nodo
-
-                        phi_cand = self._emd_particion(candidato)
-
-                        if phi_cand < phi_total - 1e-10:
-                            grupos = candidato
-                            phi_total = phi_cand
-                            g_origen = g_sin_nodo
-                            mejorado = True
-                            break
-
-                    if mejorado:
-                        break
-                if mejorado:
-                    break
-
-            if not mejorado:
+            if mejor is None:
                 break
+            bloques = mejor
+            phi = mejor_phi
 
-        return phi_total, grupos
+        return phi, bloques
 
-    # ── Candidatos de aislamiento ──────────────────────────────────────────
+    # ── Perturbación + ILS ─────────────────────────────────────────────────
 
-    def _candidatos_aislamiento(self, k: int):
+    def _perturbar_bloques(
+        self,
+        bloques: "list[tuple[frozenset, frozenset]]",
+        n_movimientos: int = 2,
+        semilla: int = 42,
+    ) -> "list[tuple[frozenset, frozenset]]":
         """
-        Genera candidatos donde k-1 nodos están aislados y el resto forma un grupo.
-
-        Para k=3, N=10: C(10,2)=45 candidatos.
-        Para k libre con todos los niveles: Σ C(N,k-1) = 2^N − 2 candidatos en total.
-        Idéntico a GeoMIP's _generar_candidatos_aislamiento.
+        Perturba una configuración de bloques alternando movimientos futuros y
+        presentes aleatorios, garantizando que ningún bloque quede sin futuro.
         """
-        import itertools
-        todos = list(range(self._N))
-        n_aislados = k - 1
-        for aislados in itertools.combinations(todos, n_aislados):
-            aislados_set = set(aislados)
-            residual = [i for i in todos if i not in aislados_set]
-            if not residual:
-                continue
-            mascara_residual = sum(1 << i for i in residual)
-            mascaras = [1 << a for a in aislados] + [mascara_residual]
-            yield mascaras
+        rng = _random_module.Random(semilla)
+        result = [(frozenset(e), frozenset(p)) for e, p in bloques]
+        k = len(result)
+        if k < 2:
+            return result
 
-    # ── EMD de partición completa ───────────────────────────────────────────
+        for _ in range(n_movimientos):
+            tipo = rng.randint(0, 1)
+            if tipo == 0:  # movimiento futuro
+                candidatos = [i for i, (e, _) in enumerate(result) if len(e) > 1]
+                if not candidatos:
+                    continue
+                i = rng.choice(candidatos)
+                eff_i, pre_i = result[i]
+                nodo = rng.choice(sorted(eff_i))
+                j = rng.choice([x for x in range(k) if x != i])
+                eff_j, pre_j = result[j]
+                result[i] = (eff_i - {nodo}, pre_i)
+                result[j] = (eff_j | {nodo}, pre_j)
+            else:  # movimiento presente (asimétrico)
+                candidatos = [i for i, (_, p) in enumerate(result) if len(p) > 0]
+                if not candidatos:
+                    continue
+                i = rng.choice(candidatos)
+                eff_i, pre_i = result[i]
+                nodo = rng.choice(sorted(pre_i))
+                j = rng.choice([x for x in range(k) if x != i])
+                eff_j, pre_j = result[j]
+                result[i] = (eff_i, pre_i - {nodo})
+                result[j] = (eff_j, pre_j | {nodo})
 
-    def _emd_particion(self, grupos: list[int]) -> float:
+        return result
+
+    def _refinar_con_ils(
+        self,
+        bloques: "list[tuple[frozenset, frozenset]]",
+        phi: float,
+    ) -> "tuple[float, list]":
         """
-        EMD total de una k-partición completa.
+        ILS: refinamiento best-improvement + ciclos N-adaptativos de perturbación.
 
-        Métrica adaptada al tamaño del sistema (transparente para la estrategia):
-          N ≤ HAMMING_EMD_MAX_N → Wasserstein-1 con d_Hamming sobre 2^N estados.
-          N > HAMMING_EMD_MAX_N → suma L1 marginal sobre N nodos (aproximación rápida).
-
-        La memoización de _cache_dist hace que llamadas repetidas para la misma
-        máscara sean O(1) sin recomputar la distribución marginal.
+        n_ils y max_iter decrecen con N porque cada evaluación EMD es O(2^N) para
+        N ≤ HAMMING_EMD_MAX_N: pocos ciclos de calidad superan muchos mediocres.
+          max_iter = max(5, 20 - max(0, N - HAMMING_EMD_MAX_N))
+          n_ils    = max(1, _N_ILS - max(0, (N - 16) // 2))
         """
-        if self._permitir_presente_vacio:
-            for mascara in grupos:
-                if mascara not in self._usar_vacio:
-                    self._costo_parte(mascara)
+        max_it = max(5, 20 - max(0, self._N - HAMMING_EMD_MAX_N))
+        n_ils = max(1, _N_ILS - max(0, (self._N - 16) // 2))
 
+        mejor_phi, mejor_bloques = self._refinar_bloques(bloques, phi, max_iter=max_it)
+
+        n_mov = max(1, self._N // 4)
+        for iter_ils in range(n_ils):
+            perturbado = self._perturbar_bloques(
+                mejor_bloques, n_movimientos=n_mov, semilla=42 + iter_ils * 17
+            )
+            phi_p = self._emd_bloques(perturbado)
+            phi_r, bloques_r = self._refinar_bloques(perturbado, phi_p, max_iter=max_it)
+            if phi_r < mejor_phi - 1e-9:
+                mejor_phi = phi_r
+                mejor_bloques = bloques_r
+
+        return mejor_phi, mejor_bloques
+
+    # ── Evaluación EMD de una partición de bloques ─────────────────────────
+
+    def _emd_bloques(self, bloques: "list[tuple[frozenset, frozenset]]") -> float:
+        """
+        EMD total de una k-partición asimétrica de bloques.
+
+        Reconstruye la distribución marginal a partir de las distribuciones de
+        cada bloque (futuro condicionado por su propio presente) y la compara
+        con la original mediante suma L1 marginal. Esta L1 es la Wasserstein-1
+        EXACTA con métrica de Hamming, porque ambas distribuciones son productos
+        de marginales (ver docstring del módulo): O(N) en vez de O(4^N).
+        """
         dist_rec = np.empty(self._N, dtype=np.float64)
-        for mascara in grupos:
-            dist_parte = self._dist_parte_efectiva(mascara)
-            for i in _bits_activos(mascara):
-                dist_rec[i] = float(dist_parte[i])
+        for fut_pos, pre_pos in bloques:
+            if not fut_pos:
+                continue
+            dist_bloque = self._dist_bloque(fut_pos, pre_pos)
+            for p in fut_pos:
+                dist_rec[p] = float(dist_bloque[p])
 
-        if self._N <= HAMMING_EMD_MAX_N:
-            P = distribucion_conjunta_vectorizada(self.sia_dists_marginales.astype(np.float64))
-            Q = distribucion_conjunta_vectorizada(dist_rec)
-            return float(emd_causal(P, Q))
-        else:
-            return float(np.sum(np.abs(dist_rec - self.sia_dists_marginales)))
+        return float(np.sum(np.abs(dist_rec - self.sia_dists_marginales)))
 
-    # ── Memoización de distribuciones y costos ─────────────────────────────
+    # ── Memoización de distribuciones de bloque ────────────────────────────
 
-    def _dist_parte(self, mascara: int) -> np.ndarray:
-        """Distribución marginal de la parte `mascara` (calculada una sola vez)."""
-        if mascara not in self._cache_dist:
-            idx_arr = np.fromiter(_bits_activos(mascara), dtype=np.int8)
-            futuros = self.sia_subsistema.indices_ncubos[idx_arr]
-            presentes = np.intersect1d(futuros, self.sia_subsistema.dims_ncubos)
-            dist = (
+    def _dist_bloque(self, fut_pos: frozenset, pre_pos: frozenset) -> np.ndarray:
+        """
+        Distribución marginal del bloque (futuros, presentes), calculada una vez.
+
+        El futuro del bloque (índices globales indices_ncubos[p]) se condiciona
+        sobre el mecanismo del bloque (índices globales dims_ncubos[p]), que puede
+        diferir del propio futuro (corte asimétrico) o estar vacío (mecanismo ∅).
+        """
+        clave = (fut_pos, pre_pos)
+        cache = self._cache_bloque.get(clave)
+        if cache is None:
+            futuros = np.fromiter(
+                (self._idx[p] for p in sorted(fut_pos)), dtype=np.int8, count=len(fut_pos)
+            )
+            presentes_pos = [p for p in sorted(pre_pos) if p < self._n_dims]
+            presentes = (
+                np.fromiter((self._dims[p] for p in presentes_pos), dtype=np.int8,
+                            count=len(presentes_pos))
+                if presentes_pos
+                else np.array([], dtype=np.int8)
+            )
+            cache = (
                 self.sia_subsistema
                 .bipartir(futuros, presentes)
                 .distribucion_marginal()
             )
-            self._cache_dist[mascara] = dist
-        return self._cache_dist[mascara]
-
-    def _dist_parte_vacio(self, mascara: int) -> np.ndarray:
-        """Distribución marginal de la parte `mascara` con mecanismo vacío (∅)."""
-        if mascara not in self._cache_dist_vacio:
-            idx_arr = np.fromiter(_bits_activos(mascara), dtype=np.int8)
-            futuros = self.sia_subsistema.indices_ncubos[idx_arr]
-            dist = (
-                self.sia_subsistema
-                .bipartir(futuros, np.array([], dtype=np.int8))
-                .distribucion_marginal()
-            )
-            self._cache_dist_vacio[mascara] = dist
-        return self._cache_dist_vacio[mascara]
-
-    def _dist_parte_efectiva(self, mascara: int) -> np.ndarray:
-        """Retorna la distribución de la parte según si usa variante vacía."""
-        if self._usar_vacio.get(mascara, False):
-            return self._dist_parte_vacio(mascara)
-        return self._dist_parte(mascara)
-
-    def _costo_parte(self, mascara: int) -> float:
-        """
-        Costo L1 de la parte `mascara` para la decisión de mecanismo vacío.
-
-        Solo se usa cuando `_permitir_presente_vacio=True`: compara el costo L1
-        normal vs el costo L1 con mecanismo ∅ y registra cuál es menor en
-        `_usar_vacio`. La selección de distribución resultante luego la usa
-        `_emd_particion` al llamar a `_dist_parte_efectiva`.
-        """
-        if mascara not in self._cache_costo:
-            dist = self._dist_parte(mascara)
-            idx_arr = np.fromiter(_bits_activos(mascara), dtype=np.int8)
-            costo_normal = float(
-                np.sum(np.abs(dist[idx_arr] - self.sia_dists_marginales[idx_arr]))
-            )
-
-            if self._permitir_presente_vacio:
-                dist_v = self._dist_parte_vacio(mascara)
-                costo_vacio = float(
-                    np.sum(np.abs(dist_v[idx_arr] - self.sia_dists_marginales[idx_arr]))
-                )
-                if costo_vacio < costo_normal:
-                    self._usar_vacio[mascara] = True
-                    self._cache_costo[mascara] = costo_vacio
-                else:
-                    self._usar_vacio[mascara] = False
-                    self._cache_costo[mascara] = costo_normal
-            else:
-                self._cache_costo[mascara] = costo_normal
-
-        return self._cache_costo[mascara]
+            self._cache_bloque[clave] = cache
+        return cache
 
 
 # Alias de compatibilidad con exec.py (que importa DynamicPartition)
