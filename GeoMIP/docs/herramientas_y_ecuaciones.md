@@ -17,19 +17,19 @@ son exactamente el caso de uso para el que NumPy está optimizado. No se necesit
 
 ---
 
-### PyEMD
-**¿Para qué?** Calcular la Earth Mover's Distance (EMD) exacta para sistemas pequeños (N ≤ 12).
+### PyEMD — relegado a verificación (ya NO en el camino caliente)
+**¿Para qué?** Históricamente, calcular la EMD exacta vía solver de transporte para N ≤ 12.
 
 ```python
 from pyemd import emd
-resultado = emd(u, v, cost_matrix)
+resultado = emd(u, v, cost_matrix)   # O(4^N): solver de transporte sobre 2^N estados
 ```
 
-**¿Por qué PyEMD?** Implementa el algoritmo de Rubner et al. (1998) usando el método del simplex
-de transporte óptimo. Es la librería de referencia para EMD en Python, con implementación en C++
-(vía Cython) que la hace mucho más rápida que una implementación pura en Python. Alternativas como
-`scipy.stats.wasserstein_distance` sólo soportan distribuciones 1D; PyEMD acepta matrices de
-costos arbitrarias, lo cual es esencial para usar Hamming como métrica base.
+**Estado actual:** se descubrió que la suma L1 marginal es la EMD de Hamming **exacta** para
+distribuciones producto (ver §2.3), que es O(N) en vez de O(4^N), da el **mismo** valor y vale
+para **todo N** sin límite. Por eso PyEMD ya **no** se usa para calcular Φ; `emd_causal` /
+`get_hamming_matrix` permanecen sólo como utilidad de verificación de esa equivalencia. La ruta
+principal (`evaluar_bloques`) usa la fórmula marginal directa.
 
 ---
 
@@ -133,11 +133,9 @@ Donde:
 Intuitivamente, la EMD es el mínimo "esfuerzo" necesario para transformar la distribución P en
 la distribución Q, donde mover una unidad de masa una distancia d cuesta d.
 
-**En código (N ≤ 12):**
-```python
-cost_mat = get_hamming_matrix(2**N)       # 2^N × 2^N matrix
-Φ = pyemd.emd(P_original, P_particionada, cost_mat)
-```
+**Esta forma general (solver de transporte) ya no se ejecuta para calcular Φ.** Como las
+distribuciones comparadas son productos de marginales, la EMD se reduce a la suma L1 marginal
+(§2.3), que es el caso particular exacto y O(N). El solver `pyemd` queda sólo como verificación.
 
 ---
 
@@ -168,32 +166,35 @@ costs[i, j] = hamming_distance(i, j)   # para todo par (i,j) en [0, 2^N)
 
 ---
 
-### 2.3 Descomposición de EMD para Variables Independientes (Caso N > 12)
+### 2.3 ⭐ Descomposición marginal de la EMD — la métrica EXACTA (para TODO N)
 
 **Teorema fundamental:** Si P y Q son distribuciones conjuntas de N variables binarias
-condicionalmente independientes, la EMD sobre el hipercubo booleano se descompone en:
+condicionalmente independientes (es decir, **productos de marginales**), la EMD de
+Wasserstein-1 sobre el hipercubo booleano con distancia base de Hamming se descompone
+**exactamente** en:
 
 ```
-EMD(P, Q) = Σᵢ₌₁ᴺ | P(nodo_i = 1) - Q(nodo_i = 1) |
+EMD_Hamming(P, Q) = Σᵢ₌₁ᴺ | P(nodo_i = 1) - Q(nodo_i = 1) |
 ```
 
-Donde `P(nodo_i = 1)` es la probabilidad marginal del nodo i en la distribución P.
+**¿Por qué es válido y por qué es EXACTO (no una aproximación)?** En cada k-partición, tanto la
+distribución original como la reconstruida son productos de marginales **por construcción**. Para
+dos productos, el problema de transporte óptimo sobre el hipercubo se **desacopla** coordenada a
+coordenada: la masa se mueve óptimamente por cada dimensión de forma independiente, y el costo
+total es la suma de los costos por dimensión (la diferencia absoluta de probabilidades en
+variables binarias). Verificado numéricamente: `|emd_causal − L1| < 1e-14` para N = 2..12.
 
-**¿Por qué es válido?** Cuando los nodos son condicionalmente independientes (lo que ocurre
-por construcción en cada parte de una k-partición), la distribución conjunta es el producto de
-las marginales. En ese caso, el problema de transporte óptimo sobre el hipercubo se desacopla:
-cada "unidad de masa" se mueve óptimamente de forma independiente por cada dimensión. El costo
-total es la suma de los costos por dimensión, que para variables binarias es la diferencia
-absoluta de probabilidades.
+Esto **no** es un atajo sólo para N grande: es la métrica única y exacta para **todo N**. Por eso
+no hay bifurcación por tamaño y se eliminó el solver `pyemd` del camino caliente.
 
-**Reducción de complejidad:**
-- EMD exacta: O(2^{3N}) en tiempo, O(2^{2N}) en memoria
-- Suma marginal: O(N) en tiempo, O(N) en memoria
+**Reducción de complejidad (sin perder precisión):**
+- EMD vía solver de transporte: O(4^N) en tiempo, O(4^N) en memoria — inviable para N grande.
+- Suma marginal exacta: **O(N)** en tiempo y memoria — válida para todo N.
 
 ```python
-# emd_optimized.py
-def emd_causal_fast_partition(dist_original, dist_reconstruida, n_nodos):
-    return float(np.sum(np.abs(dist_original - dist_reconstruida)))
+# evaluar_bloques — ruta principal
+dist_rec = subsistema.particionar(particiones).distribucion_marginal()
+return float(np.sum(np.abs(dist_original - dist_rec)))
 ```
 
 ---
@@ -235,13 +236,12 @@ Para una k-partición P = {S₁, ..., Sₖ} aplicada al subsistema (con alcance 
 Las distribuciones marginales son vectores de tamaño N donde la entrada i-ésima es:
 
 ```
-dist[i] = 1 - P(nodo_i = 0 | estado_inicial)
-         = P(nodo_i = 1 | estado_inicial)
+dist[i] = P(nodo_i = 1 | estado_inicial)
 ```
 
-El valor `1 - probabilidad` aparece porque internamente GeoMIP almacena la probabilidad
-de estado OFF y la distribución marginal invierte ese valor para comparar probabilidades de
-estado ON (convención IIT).
+`distribucion_marginal` almacena directamente P(nodo = ON) (la misma convención que QNodes),
+seleccionando el subestado correspondiente al estado inicial. Esta convención unificada hace que
+los valores reportados por GeoMIP y QNodes sean directamente comparables.
 
 La **k-MIP** es la partición que minimiza Φ:
 
@@ -319,10 +319,10 @@ resultados finales de Φ, sólo la correspondencia entre índices enteros y esta
 
 | Componente              | Decisión                             | Alternativa Descartada               | Razón                                                |
 |-------------------------|--------------------------------------|--------------------------------------|------------------------------------------------------|
-| EMD exacta              | PyEMD con Hamming                    | scipy.wasserstein                    | scipy sólo hace 1D; se necesita métrica de Hamming   |
-| EMD para N > 12         | Suma de marginales O(N)              | Construir conjunta 2^N               | Imposible en memoria para N = 20+                    |
-| Producto tensorial      | np.kron() nativo                     | PyTorch / TensorFlow                 | Vectores de 2-32 elementos; sin beneficio de GPU/autograd |
-| Generación de candidatos| Spectral + Agglomerative + Aislamiento | Fuerza bruta (Stirling S(N,k))      | S(N,k) crece super-exponencialmente                  |
+| EMD (métrica única)     | **Suma L1 marginal = EMD Hamming exacta, todo N** | PyEMD / scipy.wasserstein | L1 es O(N), exacta para productos, sin límite de tamaño |
+| EMD para N grande       | Misma fórmula marginal O(N)          | Construir conjunta 2^N + solver O(4^N) | Imposible en memoria para N = 20+; e innecesario (es exacta) |
+| Producto tensorial      | Evitado (sólo verificación/export)   | PyTorch / TensorFlow                 | Φ no necesita la conjunta; basta la marginal O(N)    |
+| Motor de búsqueda       | **Greedy top-down asimétrico** + 1-move + ILS | Spectral (fallback) / Fuerza bruta | Pool O(N) compartido; cortes asimétricos coherentes  |
 | Paralelismo             | joblib (cpu_count - 1)               | multiprocessing puro / asyncio       | joblib maneja serialización y backends automáticamente |
 | Memoria para N ≥ 18     | LazyTPM por chunks                   | Cargar CSV completo en RAM           | N=20 → 2^20×20 valores ≈ 80MB mínimo, más copias     |
 | Memoización             | NCube._marginal_cache (frozenset)    | Ninguna / recomputar siempre         | Mismas marginalizaciones se piden decenas de veces   |

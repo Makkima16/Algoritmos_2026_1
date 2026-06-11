@@ -1,209 +1,258 @@
 # Optimizaciones realizadas en QNodes
 
-Este documento detalla las optimizaciones aplicadas en `AYDA_2026_1/QNodes` para
-hacer el algoritmo tratable para N = 10, 15, 20, 22, 25 nodos, que es el rango
-objetivo del proyecto.
+Este documento detalla las optimizaciones aplicadas en `AYDA_2026_1/QNodes` que
+hacen el algoritmo **más rápido y más preciso** para N = 10, 15, 20, 22, 25 nodos,
+el rango objetivo del proyecto.
+
+Las dos optimizaciones más importantes son conceptuales, no de implementación:
+
+1. **La métrica L1 marginal es la EMD de Hamming EXACTA** (no una aproximación) →
+   reduce cada evaluación de Φ de O(4^N) a O(N) **sin perder precisión** y elimina
+   el límite N ≤ 12.
+2. **Los cortes asimétricos** (futuro y presente particionados de forma
+   independiente) corrigen el "sobre-corte" que inflaba Φ → **resultados más
+   precisos y coherentes** (Φ monótono entre k consecutivos).
+
+Todo lo demás (greedy top-down con pool compartido, movimiento presente, ILS,
+memoización) acelera o afina sobre estas dos bases.
 
 ---
 
-## 1. Cambio de paradigma: de búsqueda exhaustiva a greedy aglomerativo
+## 1. ⭐ Métrica L1 marginal = Wasserstein-1 Hamming EXACTA (más rápida Y más precisa)
 
-**La optimización más importante es algorítmica, no de implementación.**
+**Archivo:** `src/strategies/q_nodes.py` — `_emd_bloques`
 
-La versión anterior (`DynamicPartition`) exploraba todas las k-particiones usando
-DP + Branch & Bound. Para N = 25, el espacio de búsqueda es B(25) ≈ 4 × 10¹⁸
-particiones — intractable incluso con poda agresiva.
+Esta es la optimización de mayor impacto, porque mejora **simultáneamente velocidad
+y precisión**, algo poco común (normalmente una se sacrifica por la otra).
 
-El greedy aglomerativo reemplaza la búsqueda exhaustiva por una secuencia de
-N − 2 fusiones, cada una evaluando C(k, 2) ≈ k²/2 pares:
+### El problema previo
+
+La versión anterior calculaba Φ de dos formas según N:
+- **N ≤ 12:** EMD real con `pyemd` sobre la distribución conjunta de 2^N estados y
+  una matriz de costes Hamming de 2^N × 2^N → **O(4^N)**.
+- **N > 12:** suma L1 marginal como **aproximación**, asumida menos precisa.
+
+Esto imponía un techo duro: para N > 12 la EMD "real" era inviable en memoria
+(la matriz de costes de N=20 pesaría ~10¹² entradas), así que se aceptaba que el
+resultado para sistemas grandes era aproximado.
+
+### La observación clave
+
+Tanto la distribución original como la reconstruida de **cualquier** k-partición
+son **productos de marginales por nodo** (independencia condicional garantizada por
+construcción: cada bloque se reconstruye con `distribucion_marginal`). Para **dos
+distribuciones producto** sobre el hipercubo booleano con métrica base de Hamming,
+la Wasserstein-1 (EMD real) **coincide EXACTAMENTE** con la suma de diferencias L1
+marginales, porque la distancia de Hamming es separable por coordenada y el
+acoplamiento óptimo factoriza coordenada a coordenada:
 
 ```
-Total evaluaciones ≈ Σₖ₌₂ᴺ k²/2 ≈ N³/6
-
-N=10:  ~167 evaluaciones
-N=15:  ~563 evaluaciones
-N=20: ~1333 evaluaciones
-N=25: ~2604 evaluaciones
+EMD_Hamming(P, Q) = Σᵢ |P(nodo_i = ON) − Q(nodo_i = ON)|        (cuando P, Q son productos)
 ```
 
-Comparado con B(N) exhaustivo:
+Verificado numéricamente: `|emd_causal(P,Q) − L1| < 1e-14` para N = 2..12.
 
-| N | B(N) exhaustivo | Greedy aglomerativo | Factor reducción |
-|---|---|---|---|
-| 10 | ~115 000 | ~167 | ×690 |
-| 15 | ~1.4 × 10⁹ | ~563 | ×2.5 × 10⁶ |
-| 25 | ~4 × 10¹⁸ | ~2 604 | ×10¹⁵ |
-
----
-
-## 2. Memoización de distribuciones marginales
-
-**Archivo:** `src/strategies/q_nodes.py` — `_dist_parte`, `_cache_dist`
-
-La distribución marginal de cada parte se calcula una sola vez. Esta es la operación
-más costosa (involucra `bipartir` y `distribucion_marginal` sobre el sistema):
+### Consecuencia: más rápido
 
 ```python
-def _dist_parte(self, mascara: int) -> np.ndarray:
-    if mascara not in self._cache_dist:
-        idx_arr = np.fromiter(_bits_activos(mascara), dtype=np.int8)
-        futuros = self.sia_subsistema.indices_ncubos[idx_arr]
-        presentes = np.intersect1d(futuros, self.sia_subsistema.dims_ncubos)
-        dist = self.sia_subsistema.bipartir(futuros, presentes).distribucion_marginal()
-        self._cache_dist[mascara] = dist
-    return self._cache_dist[mascara]
+def _emd_bloques(self, bloques) -> float:
+    dist_rec = np.empty(self._N, dtype=np.float64)
+    for fut_pos, pre_pos in bloques:
+        if not fut_pos:
+            continue
+        dist_bloque = self._dist_bloque(fut_pos, pre_pos)   # memoizada
+        for p in fut_pos:
+            dist_rec[p] = float(dist_bloque[p])
+    return float(np.sum(np.abs(dist_rec - self.sia_dists_marginales)))   # O(N)
 ```
 
-La misma máscara aparece como candidato en múltiples evaluaciones de `_emd_particion`
-a lo largo del agrupamiento, el refinamiento y los candidatos de aislamiento. Con caché,
-cada distribución se computa una sola vez por sesión.
+Cada evaluación de Φ pasa de **O(4^N)** (construir conjunta + solver de transporte)
+a **O(N)** (un vector de N restas absolutas). Para N=10 esto es la diferencia entre
+construir y operar sobre matrices de 1024×1024 y operar sobre un vector de 10
+elementos.
 
-**Impacto:** el número efectivo de llamadas costosas a `bipartir` es O(N²) en lugar de
-O(N³) para el agrupamiento, ya que muchas máscaras candidatas son las mismas.
+### Consecuencia: más preciso
+
+- **Da el MISMO Φ que la EMD real**, no una aproximación: k=2 en N10A = 0.4746,
+  idéntico al de GeoMIP y a la antigua ruta `pyemd`.
+- **Elimina el límite N ≤ 12.** Antes, N > 12 usaba una aproximación; ahora todos
+  los N usan la fórmula exacta. El resultado para N = 20, 22, 25 es tan exacto como
+  para N = 5.
+- Por eso se **eliminó la dependencia de `pyemd`**: era más lenta (O(4^N)), daba el
+  mismo número, y restringía el tamaño del sistema.
+
+> Esto **corrige** la nota antigua que afirmaba que "L1 = pyemd sólo si P es un
+> producto, lo cual no ocurre en IIT". Sí ocurre aquí: ambas distribuciones son
+> productos de marginales **por construcción**.
 
 ---
 
-## 3. Métrica adaptada al tamaño en `_emd_particion`
+## 2. ⭐ Cortes asimétricos: corrigen el sobre-corte (más preciso)
 
-**Archivo:** `src/strategies/q_nodes.py` — `_emd_particion`  
-**Archivo:** `src/funcs/iit.py` — `HAMMING_EMD_MAX_N`, `emd_causal`
+**Archivo:** `src/strategies/q_nodes.py` — representación `Bloque`, `_construir_pool_cortes`
 
-La función `_emd_particion` es el único punto donde se toma una decisión basada en N,
-de forma transparente para la estrategia:
+### El problema previo
 
-```python
-if self._N <= HAMMING_EMD_MAX_N:
-    # Wasserstein-1 con d_Hamming — métrica exacta de IIT
-    P = distribucion_conjunta_vectorizada(sia_dists_marginales)
-    Q = distribucion_conjunta_vectorizada(dist_rec)
-    return float(emd_causal(P, Q))
-else:
-    # Suma L1 marginal — aproximación rápida para N grande
-    return float(np.sum(np.abs(dist_rec - sia_dists_marginales)))
-```
+Cada bloque se representaba de forma **simétrica**: el presente (mecanismo, t) de un
+grupo era siempre `futuros ∩ dims`, es decir, cada grupo sólo condicionaba sobre sus
+propios nodos. Esto **sobre-cortaba** el sistema: un nodo aislado en su futuro perdía
+también su rol causal como condicionante de otros bloques, inflando Φ.
 
-Para N ≤ 12: la EMD Hamming requiere construir distribuciones conjuntas de tamaño 2^N
-(1024 estados para N=10) y una matriz de costes 2^N × 2^N (~8 MB para N=10). Tratable.
+El síntoma era un **salto incoherente** entre k=2 y k=3 (medido en N10A,
+estado=1000…0):
 
-Para N > 12: la distribución conjunta sería de tamaño 2^N (>4096 estados) y la matriz
-de costes de tamaño 4^N — inviable en memoria y tiempo. La suma L1 marginal es la
-aproximación práctica para sistemas grandes.
-
-La estrategia algorítmica (las tres fases, para todo k, para todo N) es siempre la
-misma. Solo la métrica interna de `_emd_particion` varía según N.
-
----
-
-## 4. Caché de matrices Hamming (`_HAMMING_CACHE`)
-
-**Archivo:** `src/funcs/iit.py` — `get_hamming_matrix`, `_HAMMING_CACHE`
-
-Para N ≤ 12, `emd_causal` necesita la matriz de costes Hamming de tamaño 2^N × 2^N.
-Construirla en cada llamada costaría O(4^N). Se cachea una vez por sesión:
-
-```python
-_HAMMING_CACHE: dict[int, np.ndarray] = {}
-
-def get_hamming_matrix(n: int) -> np.ndarray:
-    if n not in _HAMMING_CACHE:
-        # Construir la matriz (2^N × 2^N) de distancias Hamming — O(4^N) una vez
-        _HAMMING_CACHE[n] = <construcción>
-    return _HAMMING_CACHE[n]  # O(1) en llamadas posteriores
-```
-
-Para N = 10: matriz 1024 × 1024 ≈ 8 MB (float64). Se construye una sola vez por sesión
-y se reutiliza en todas las llamadas a `emd_causal` de ese sistema.
-
----
-
-## 5. Representación bitwise de conjuntos
-
-**Archivo:** `src/strategies/q_nodes.py` — función `_bits_activos`
-
-Los grupos se representan como enteros (máscaras de bits) en lugar de listas o sets:
-
-| Operación | Con listas | Con bitmask |
+| k | Corte simétrico (viejo) | Corte asimétrico (nuevo) |
 |---|---|---|
-| Unión Gᵢ ∪ Gⱼ | `set(a) | set(b)` O(N) | `a \| b` O(1) |
-| Añadir nodo n | `list.append(n)` | `g \| (1 << n)` O(1) |
-| Eliminar nodo n | `list.remove(n)` O(N) | `g ^ (1 << n)` O(1) |
-| Clave de caché | `tuple(sorted(...))` | `int` directo |
+| 2 | 0.4746 | 0.4746 |
+| 3 | **2.5059** (salto) | **0.9590** (monótono) |
 
-Las claves enteras en los diccionarios de caché son más eficientes que tuplas
-(menor overhead de hashing, mejor localidad de memoria).
+### La solución
 
----
+Cada bloque es ahora un par **`(frozenset futuros, frozenset presentes)`** donde
+futuro (t+1) y presente (t) se particionan de forma **independiente**:
 
-## 6. Refinamiento reutiliza caché de distribuciones
+- **futuros:** el alcance/efecto que el bloque produce.
+- **presentes:** el mecanismo/causa que el bloque conserva como condicionante.
 
-**Archivo:** `src/strategies/q_nodes.py` — `_refinamiento_local`
+Un nodo puede aportar su mecanismo a un bloque mientras su futuro vive en otro. Esto
+replica la lógica de GeoMIP y evita penalizaciones causales falsas.
 
-El refinamiento 1-move evalúa movimientos candidatos con `_emd_particion`. Dentro,
-`_dist_parte_efectiva` consulta `_cache_dist`. Las máscaras de los grupos ya evaluados
-durante el agrupamiento son cache hits O(1); solo las nuevas combinaciones (g_sin_nodo,
-g_con_nodo) pueden ser cache miss.
+### Impacto en precisión
 
-En la práctica, la mayoría de los movimientos candidatos corresponden a máscaras que
-ya existen en caché (el refinamiento trabaja sobre grupos ya formados), por lo que
-el refinamiento es efectivamente mucho más rápido que su complejidad teórica
-O(N × k × 20 iteraciones).
+- Φ crece de forma **monótona y coherente** con k (patrón Φ(k) ≈ (k−1)×~0.5).
+- QNodes y GeoMIP dan el **mismo Φ** para todo k (ambos asimétricos + L1 exacta).
+- Desaparece la inflación artificial: el `({i}, ∅)` (mecanismo vacío) deja que el
+  nodo i siga condicionando causalmente al resto.
 
 ---
 
-## 7. Historial de k-particiones como base de la búsqueda libre
+## 3. Pool de cortes O(N) construido una sola vez (más rápido)
 
-**Archivo:** `src/strategies/q_nodes.py` — `historico` en `_aglomerar`
+**Archivo:** `src/strategies/q_nodes.py` — `_construir_pool_cortes`
 
-Cada k-partición se guarda durante el agrupamiento sin costo adicional:
+En lugar de generar cortes candidatos en cada paso, se construye **una sola vez** un
+pool de **O(N)** cortes y se reutiliza en todo el descenso greedy y para todos los k:
 
 ```python
-historico[len(grupos)] = (phi_total, list(grupos))
+for i in range(self._N):
+    eff = frozenset((i,))
+    pre = frozenset((i,)) if i < self._n_dims else frozenset()
+    _add(eff, pre)                    # 1. aislamiento simétrico ({i}, {pre_i})
+    _add(all_fut - eff, all_pre - pre)  # 2. su complemento
+    _add(eff, frozenset())            # 3. aislamiento con mecanismo vacío ({i}, ∅)
 ```
 
-`_aglomerar()` siempre retorna el historial completo; `aplicar_estrategia` decide
-qué hacer con él según si k fue especificado o no.
-
-**Ventaja — k especificado:** se toma `historico[k]` directamente sin rehacer
-el agrupamiento. El historial amortiza el coste O(N³) entre todos los k posibles.
-
-**Ventaja — k libre:** el historial es el punto de partida de las tres fases para
-todos los niveles k. El refinamiento y los candidatos de aislamiento parten de una
-solución greedy de calidad, reduciendo el número de mejoras necesarias.
-
-El costo de memoria del historial es O(N²) en el peor caso (N entradas, cada una
-con hasta N grupos enteros). Para N=25: ~625 enteros → despreciable.
+Tres familias por nodo → **3N cortes** en total, deduplicados. Construir el pool es
+O(N); el costo se **amortiza** entre todos los splits y todos los niveles k del
+descenso, en vez de regenerarse en cada paso.
 
 ---
 
-## 8. Limpieza de cachés entre ejecuciones
+## 4. Greedy top-down con jerarquía nido (más rápido Y más coherente)
 
-**Archivo:** `src/strategies/q_nodes.py` — inicio de `aplicar_estrategia`
+**Archivo:** `src/strategies/q_nodes.py` — `_greedy_descenso`, `_greedy_bloques`
 
-Entre ejecuciones consecutivas (modo CSV por bloques), los cachés se reinician:
+Un **único descenso** top-down (de 1 bloque a N bloques) registra Φ para **cada k**:
 
 ```python
-self._cache_dist.clear()
-self._cache_costo.clear()
-self._cache_dist_vacio.clear()
-self._usar_vacio.clear()
+historico = {1: (phi_inicial, bloques)}
+while len(bloques) < self._N:
+    phi, bloques = self._mejor_split_bloques(bloques, pool)
+    historico[len(bloques)] = (phi, list(bloques))
 ```
 
-Esto evita que distribuciones de un sistema contaminen el cálculo del siguiente
-y que los cachés crezcan indefinidamente en runs largos con muchos sistemas.
+- **Más rápido (k libre):** no se rehace la búsqueda por cada k; un solo descenso
+  O(N²·|pool|) produce la solución de todos los k simultáneamente.
+- **Más coherente:** cada k surge de dividir un bloque del nivel anterior →
+  **jerarquía anidada** → Φ monótono no decreciente entre k consecutivos, sin saltos.
+- **Más rápido (k fijo):** `_greedy_bloques` detiene el descenso exactamente en k.
+
+---
+
+## 5. Movimiento presente asimétrico en el refinamiento (más preciso)
+
+**Archivo:** `src/strategies/q_nodes.py` — `_refinar_bloques`
+
+El refinamiento best-improvement explora **dos** tipos de vecinos, el segundo
+imposible en representaciones simétricas:
+
+- **Movimiento futuro:** traslada un nodo futuro del bloque i al j.
+- **Movimiento presente (asimétrico):** traslada el **mecanismo** de un nodo sin
+  mover su futuro.
+
+El movimiento presente abre una dimensión de búsqueda completamente nueva: permite
+afinar *qué bloque condiciona sobre qué nodo* sin alterar la partición de los
+futuros. Captura mínimos que el 1-move clásico (simétrico) no puede alcanzar →
+**soluciones de menor Φ**. Aplica el globalmente mejor vecino por ronda hasta
+convergencia.
+
+---
+
+## 6. ILS N-adaptativa (más preciso sin penalizar el tiempo)
+
+**Archivo:** `src/strategies/q_nodes.py` — `_refinar_con_ils`, `_perturbar_bloques`
+
+La Búsqueda Local Iterada perturba el óptimo local y re-refina para escapar de
+mínimos locales. Sus parámetros **decrecen con N** para mantener el tiempo acotado
+sin perder calidad donde más importa:
+
+```python
+max_it = max(5, 20 - max(0, self._N - HAMMING_EMD_MAX_N))
+n_ils  = max(1, _N_ILS - max(0, (self._N - 16) // 2))
+n_mov  = max(1, self._N // 4)   # intensidad de la perturbación
+```
+
+Para N pequeño se hacen muchos ciclos de calidad; para N grande, pocos pero
+dirigidos. Pocos ciclos buenos superan a muchos mediocres cuando cada evaluación es
+cara. `HAMMING_EMD_MAX_N` ya **no** selecciona métrica (la métrica es siempre L1
+exacta); sólo calibra cuántas iteraciones de ILS valen la pena.
+
+---
+
+## 7. Memoización de distribuciones de bloque (más rápido)
+
+**Archivo:** `src/strategies/q_nodes.py` — `_dist_bloque`, `_cache_bloque`
+
+La operación más cara es `bipartir(...).distribucion_marginal()`. Se memoiza por
+clave `(futuros, presentes)`:
+
+```python
+def _dist_bloque(self, fut_pos, pre_pos):
+    clave = (fut_pos, pre_pos)
+    cache = self._cache_bloque.get(clave)
+    if cache is None:
+        cache = self.sia_subsistema.bipartir(futuros, presentes).distribucion_marginal()
+        self._cache_bloque[clave] = cache
+    return cache
+```
+
+El mismo bloque aparece como candidato muchas veces a lo largo del descenso, el
+refinamiento y la ILS. Con caché, cada distribución se computa **una sola vez por
+sesión**. Las claves son `frozenset` (no listas), con hashing barato y estable.
+
+El caché se limpia al inicio de cada `aplicar_estrategia` para que un sistema no
+contamine al siguiente en runs por bloques.
 
 ---
 
 ## Resumen de impacto por optimización
 
-| Optimización | Activa cuando | Reducción de tiempo |
-|---|---|---|
-| Greedy vs exhaustivo | Siempre | ×10¹⁵ para N=25 |
-| Caché de distribuciones (`_cache_dist`) | Siempre | 70–90 % en la operación más cara |
-| Caché de matrices Hamming (`_HAMMING_CACHE`) | N ≤ 12 | O(4^N) → O(1) por sesión |
-| Métrica L1 en lugar de Hamming EMD | N > 12 | O(2^N) → O(N) por evaluación |
-| Bitmask vs listas | Siempre | 10–20 % overhead de tipo |
-| Refinamiento reutiliza caché | Siempre | Efectivamente O(1) por hit |
-| Historial de k-particiones | Siempre | 0 EMDs extra al cambiar k |
+| Optimización | Efecto | Velocidad | Precisión |
+|---|---|---|---|
+| **L1 = EMD Hamming exacta** | O(4^N) → O(N), sin límite N≤12 | ⭐⭐⭐ | ⭐⭐⭐ (mismo Φ, exacto) |
+| **Cortes asimétricos** | Corrige el sobre-corte | — | ⭐⭐⭐ (sin saltos en k) |
+| Pool de cortes O(N) único | Amortizado entre k y splits | ⭐⭐ | — |
+| Greedy top-down nido | 1 descenso = todos los k | ⭐⭐ | ⭐ (Φ monótono) |
+| Movimiento presente | Vecindario asimétrico nuevo | — | ⭐⭐ |
+| ILS N-adaptativa | Escapa de mínimos locales | ⭐ | ⭐⭐ |
+| Memoización `_cache_bloque` | Distribución 1 vez por sesión | ⭐⭐ | — |
 
-Las dos primeras filas son las que hacen el problema tratable para N=25.
-Para N ≤ 12, el caché de la matriz Hamming es adicionalmente importante.
+**Tiempos medidos (estado='1000…0', candidato/alcance/mecanismo completos):**
+
+- **N10A:** k=2 = 0.4746 / k=3 = 0.9590 / k=4 = 1.4453, todos en **~0.2–0.5 s**
+  (antes k=2 tardaba ~34 s).
+- **N15A:** k=2 = 0.4956 / k=3 = 0.9919 (~1 s).
+- **N20A:** k=2 = 0.4992 / k=3 = 0.9985 (~15–20 s); k=None ~60 s.
+
+Las dos primeras filas (L1 exacta + cortes asimétricos) son las que convierten a
+QNodes en simultáneamente más rápido **y** más preciso que la versión anterior.

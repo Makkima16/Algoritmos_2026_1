@@ -48,3 +48,5 @@ HTML_EXTENSION: str = "html"
 EXCEL_EXTENSION: str = "xlsx"
 
 TYPE_TAG = "type"
+
+COST_TABLE_CHUNK_ROWS: int = 4096

@@ -18,7 +18,25 @@
       "Bash(.venv/Scripts/pip install *)",
       "Bash(echo \"EXIT: $?\")",
       "Read(//tmp/**)",
-      "Bash(\"/c/universidad/Analisis y *)"
+      "Bash(\"/c/universidad/Analisis y *)",
+      "Bash(..\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/test_tabla_t.py -v --tb=short)",
+      "Bash(.venv/Scripts/python.exe -m pytest GeoMIP/tests/test_tabla_t.py -v --tb=short)",
+      "Bash(.venv/Scripts/pip.exe install *)",
+      "Bash(.venv\\\\Scripts\\\\python.exe -m pytest GeoMIP/tests/test_tabla_t.py -v)",
+      "Bash(ls .venv/Scripts/python*)",
+      "Bash(.venv/Scripts/python.exe -c \"import openpyxl,sys; wb=openpyxl.load_workbook\\('DatosPruebas2026_1.xlsx'\\); [print\\(repr\\(ws.title\\),'dims=',ws.dimensions,'max_row=',ws.max_row,'max_col=',ws.max_column\\) for ws in wb.worksheets]\")",
+      "Bash(ls GeoMIP/data/samples_binary)",
+      "Bash(ls QNodes/data/samples_binary)",
+      "Bash(ls GeoMIP/data/Pruebas)",
+      "Bash(ls QNodes/data/Pruebas)",
+      "Bash(.venv/Scripts/python.exe data_scripts/_worker_motor.py /tmp/lote_test.json)",
+      "Bash(cp DatosPruebas2026_1.xlsx DatosPruebas2026_1.bak.xlsx)",
+      "Bash(.venv/Scripts/python.exe data_scripts/run_suite_2026.py --solo-n 10 --solo-k 3 --solo-motor qnodes)",
+      "Bash(PYTHONUTF8=1 .venv/Scripts/python.exe -c ' *)",
+      "Bash(ls GeoMIP/src/models/base)",
+      "Bash(ls QNodes/src/models/base)",
+      "Bash(\".venv/Scripts/python.exe\" \"data_scripts/_worker_motor.py\" /tmp/lote_test.json)",
+      "Bash(\".venv/Scripts/python.exe\" \"data_scripts/run_suite_2026.py\")"
     ]
   }
 }

@@ -1,21 +1,45 @@
 # Estrategia implementada para hallar la k-partición
 
-**Clase:** `QNodes` — `src/strategies/q_nodes.py`
+**Clase:** `QNodes` (alias `DynamicPartition`) — `src/strategies/q_nodes.py`
 
 ---
 
 ## 1. Definición del problema
 
 Dado un sistema de N nodos con una distribución de probabilidad conjunta, se busca la
-**k-partición de mínima información** (MIP): la división del sistema en k subconjuntos
-disjuntos P₁, P₂, …, Pₖ tal que la pérdida Phi (Φ) sea mínima.
+**k-partición de mínima información** (MIP): la división del sistema en k bloques tal
+que la pérdida Phi (Φ) sea mínima.
 
 Cuando k no está fijado, se busca sobre todos los k ∈ [2, N] y se reporta el k con
-menor Phi global (priorizando k ≥ 3 como objetivo principal del proyecto).
+menor Φ global (priorizando k ≥ 3 como objetivo principal del proyecto).
 
 ---
 
-## 2. Por qué no se usa búsqueda exhaustiva
+## 2. Representación ASIMÉTRICA de bloques (clave de todo el algoritmo)
+
+Cada bloque es un par **`(frozenset futuros, frozenset presentes)`** de posiciones
+locales que se particionan de forma **independiente**:
+
+- **futuros (t+1):** el alcance/efecto que el bloque produce.
+- **presentes (t):** el mecanismo/causa que el bloque conserva como condicionante.
+
+A diferencia de un corte **simétrico** (donde el presente de un bloque es siempre
+`futuros ∩ dims`, es decir cada grupo sólo condiciona sobre sus propios nodos), el
+corte **asimétrico** permite que un nodo aislado en su futuro siga actuando como
+condicionante causal de otro bloque. Esto evita el "sobre-corte" que inflaba Φ y
+genera coherencia entre k (ver `docs/optimizaciones.md`, §2).
+
+```
+Bloque = (frozenset futuros_pos, frozenset presentes_pos)
+
+Ejemplo k=3 sobre {A,B,C,D,E}:
+  ({A,B}, {a,b})   ({C,D}, {c})   ({E}, ∅)
+   futuro  presente  futuro presente  futuro  mecanismo vacío
+```
+
+---
+
+## 3. Por qué no se usa búsqueda exhaustiva
 
 La búsqueda exhaustiva sobre todas las k-particiones requiere explorar B(N) casos
 (número de Bell), que crece super-exponencialmente:
@@ -24,306 +48,184 @@ La búsqueda exhaustiva sobre todas las k-particiones requiere explorar B(N) cas
 |---|---|---|
 | 10 | ~115 000 | segundos |
 | 15 | ~1 400 millones | horas |
-| 20 | ~5 × 10¹³ | intractable |
-| 25 | ~4 × 10¹⁸ | intractable |
+| 20 | ~5 × 10¹³ | intratable |
+| 25 | ~4 × 10¹⁸ | intratable |
 
-Para N = 15, 20, 22, 25 — los tamaños objetivo del proyecto — la búsqueda
-exhaustiva es inviable incluso con Branch & Bound agresivo.
+Para N = 15, 20, 22, 25 — los tamaños objetivo — la búsqueda exhaustiva es inviable
+incluso con poda agresiva.
 
 ---
 
-## 3. Estructura general del algoritmo
+## 4. Estructura general del algoritmo
 
-QNodes aplica **las mismas tres fases para todo N**, sin excepciones:
+El **mismo motor** se usa para todo k, sin distinguir el caso k=2:
 
 ```
 aplicar_estrategia()
-  ├── 1. Preparar subsistema (condicionar, marginalizar)
-  ├── 2. _aglomerar() — agrupamiento greedy O(N³)
-  │       ├── Inicializar N singletons
-  │       ├── Pre-poblar _cache_dist para todos los singletons
-  │       ├── Calcular phi_total inicial con _emd_particion
-  │       └── Repetir N-2 veces:
-  │               Evaluar _emd_particion para cada par candidato de fusión
-  │               Fusionar el par con menor Phi resultante
-  │               Registrar historico[k] = (phi, grupos)
-  │           Retornar historial completo {k: (phi, grupos)} para k ∈ [2, N]
+  ├── 1. Preparar subsistema (condicionar TPM al estado inicial, marginalizar)
+  ├── 2. _construir_pool_cortes()  → pool de O(N) cortes, construido UNA vez
   │
   ├── [k especificado]
-  │       ├── 3a. _refinamiento_local(historico[k]) — 1-move hasta convergencia
-  │       └── 4a. _candidatos_aislamiento(k) — C(N, k-1) candidatos
-  │               Evaluar con _emd_particion; si mejoran → adoptar + refinar
+  │       ├── _greedy_bloques(pool, k)   — top-down hasta k bloques
+  │       ├── _refinar_bloques(...)      — best-improvement 1-move (futuro + presente)
+  │       └── _refinar_con_ils(...)      — perturbación + re-refinamiento (ILS)
   │
-  └── [k libre — búsqueda independiente sobre todos los niveles]
-          Para cada k_nivel en historico (k_nivel ∈ [2, N]):
-              _refinamiento_local(historico[k_nivel])
-              _candidatos_aislamiento(k_nivel) → C(N, k_nivel-1) evaluaciones
-              Si mejoran: adoptar + _refinamiento_local nuevamente
-          Elegir k_nivel con menor Phi (≥ 3 preferido) entre todos los niveles
+  └── [k libre — k=None]
+          ├── _greedy_descenso(pool)     — un descenso = un Φ por CADA k (jerarquía nido)
+          ├── _refinar_bloques(nivel)    — refinamiento ligero por cada nivel k
+          ├── elegir k ≥ 3 con menor Φ
+          └── _refinar_con_ils(ganador)  — ILS final sobre el k ganador
 ```
 
-La memoización de `_cache_dist` hace que todas las evaluaciones de `_emd_particion`
-sobre máscaras ya vistas sean O(1), amortizando el costo de las tres fases.
+La memoización de `_cache_bloque` hace que las distribuciones de bloque vistas sean
+O(1) en evaluaciones posteriores, amortizando el costo de las cuatro fases.
 
 ---
 
-## 4. Representación del estado
+## 5. Pool de cortes (`_construir_pool_cortes`)
 
-Cada subconjunto de nodos se representa como una **máscara entera** de N bits.
+Se construye **una sola vez** un pool de O(N) cortes candidatos. Por cada nodo i se
+generan tres familias:
 
+```python
+for i in range(self._N):
+    eff = frozenset((i,))
+    pre = frozenset((i,)) if i < self._n_dims else frozenset()
+    _add(eff, pre)                       # 1. aislamiento simétrico ({i}, {pre_i})
+    _add(all_fut - eff, all_pre - pre)   # 2. su complemento
+    _add(eff, frozenset())               # 3. aislamiento con mecanismo vacío ({i}, ∅)
 ```
-Nodo:       E   D   C   B   A
-Índice:     4   3   2   1   0
-Bit:       16   8   4   2   1
 
-{A, C, E} = 0b10101 = 21
-{B, D}    = 0b01010 = 10
-```
-
-Operaciones sobre máscaras:
-
-| Operación | Expresión |
-|---|---|
-| Unión Gᵢ ∪ Gⱼ | `Gᵢ \| Gⱼ` |
-| Eliminar nodo n de G | `G ^ (1 << n)` |
-| Añadir nodo n a G | `G \| (1 << n)` |
-| Bit mínimo (primer nodo) | `m & (-m)` |
+La familia 3 (mecanismo vacío, estilo GeoMIP) es la que, al aplicarse a un bloque B,
+produce `inside=({i}, ∅)` dejando el mecanismo de i intacto en `outside` — i sigue
+condicionando al resto. El pool se comparte entre todos los splits y todos los niveles
+k del descenso.
 
 ---
 
-## 5. Fase 1: agrupamiento aglomerativo greedy
+## 6. Greedy top-down sobre bloques
 
-### 5.1 Inicialización
+### 6.1 Mejor split (`_mejor_split_bloques`)
 
-Se crean N grupos (singletons), uno por nodo. Se pre-populan los cachés de
-distribuciones y se calcula el Phi inicial de la partición trivial de N partes:
+Para cada bloque b y cada corte c del pool se evalúa dividir b en:
 
-```python
-grupos = [1 << i for i in range(N)]
-
-for g in grupos:
-    self._dist_parte(g)          # pre-pobla _cache_dist
-
-phi_total = self._emd_particion(grupos)   # Phi de la N-partición inicial
-historico[N] = (phi_total, list(grupos))
+```
+inside  = (b.fut ∩ c.fut,  b.pre ∩ c.pre)
+outside = (b.fut − c.fut,  b.pre − c.pre)
 ```
 
-### 5.2 Criterio de fusión
+Se exige que **ambos** lados conserven al menos un futuro (partición limpia de los N
+nodos futuros); el presente puede quedar asimétrico o vacío. Se elige el split con
+menor Φ (`_emd_bloques`).
 
-En cada paso se evalúan todos los C(k, 2) pares de grupos actuales.
-Para cada par (Gᵢ, Gⱼ) se construye la partición candidata completa y se
-evalúa con `_emd_particion`:
+### 6.2 k especificado (`_greedy_bloques`)
 
-```python
-candidato = grupos_sin_i_j + [Gᵢ | Gⱼ]
-phi_cand  = self._emd_particion(candidato)
-```
+Parte de un único bloque (TODOS los futuros, TODOS los presentes) y aplica k−1 mejores
+splits, deteniéndose exactamente en k bloques.
 
-Se elige la fusión con **menor phi_cand** total.
+### 6.3 k libre (`_greedy_descenso`)
 
-### 5.3 Registro del historial
-
-Después de cada fusión se guarda el estado en `historico[k_actual]`:
+Un **único descenso** de k=1 a k=N registra Φ en cada nivel:
 
 ```python
-historico[len(grupos)] = (phi_total, list(grupos))
+historico = {1: (self._emd_bloques(bloques), list(bloques))}
+while len(bloques) < self._N:
+    phi, bloques = self._mejor_split_bloques(bloques, pool)
+    historico[len(bloques)] = (phi, list(bloques))
 ```
 
-Esto da acceso a cualquier nivel k desde k=N hasta k=2 sin rehacer el cálculo.
-`_aglomerar()` retorna el historial completo — la selección de k y las fases
-de refinamiento ocurren en `aplicar_estrategia`.
-
-### 5.4 Selección de la k óptima
-
-**Si k fue especificado:** `aplicar_estrategia` toma `historico[k]` y aplica
-refinamiento + candidatos de aislamiento para ese k exacto.
-
-**Si k es libre (k=None):** se aplican refinamiento + candidatos de aislamiento
-para **cada nivel k** del historial, luego se elige el k ∈ {3, …, N} con menor
-Phi entre todos los niveles refinados:
-
-```python
-historico_refinado = {}
-for k_nivel, (phi_nivel, grupos_nivel) in historico.items():
-    phi_r, grupos_r = self._refinamiento_local(grupos_nivel, phi_nivel)
-    if k_nivel < self._N:
-        for candidato in self._candidatos_aislamiento(k_nivel):
-            phi_cand = self._emd_particion(candidato)
-            if phi_cand < phi_r - 1e-10:
-                phi_r, grupos_r = phi_cand, candidato
-        phi_r, grupos_r = self._refinamiento_local(grupos_r, phi_r)
-    historico_refinado[k_nivel] = (phi_r, grupos_r)
-
-candidatos_k3 = {kk: ph for kk, (ph, _) in historico_refinado.items() if kk >= 3}
-mejor_k = min(candidatos_k3, key=candidatos_k3.get)
-```
+Como cada k surge de dividir un bloque del nivel anterior, la jerarquía es **anidada**
+→ Φ monótono no decreciente entre k consecutivos (coherencia garantizada, sin saltos).
 
 ---
 
-## 6. Fase 2: refinamiento local 1-move
+## 7. Refinamiento local best-improvement (`_refinar_bloques`)
 
-### 6.1 Motivación
+En cada ronda evalúa TODOS los vecinos y aplica el globalmente mejor. Hay dos tipos de
+movimiento:
 
-El greedy aglomerativo puede producir fusiones subóptimas en pasos tempranos que
-luego no se pueden deshacer. El refinamiento local corrige las más evidentes.
-
-### 6.2 Movimiento 1-move
-
-Para cada nodo n en cada grupo Gᵢ (con |Gᵢ| ≥ 2), se evalúa moverlo a cada
-otro grupo Gⱼ usando `_emd_particion`:
+- **Movimiento futuro:** traslada un nodo futuro del bloque i al j (sin vaciar el
+  futuro de i).
+- **Movimiento presente (asimétrico):** traslada el **mecanismo** de un nodo del
+  bloque i al j **sin** mover su futuro — exclusivo del esquema asimétrico.
 
 ```python
-candidato = grupos con grupos[idx_origen]=Gᵢ\{n}, grupos[idx_dest]=Gⱼ∪{n}
-phi_cand  = self._emd_particion(candidato)
+# movimiento presente
+cfg[i] = (eff_i, pre_i - {nodo})
+cfg[j] = (eff_j, pre_j | {nodo})
+phi_cand = self._emd_bloques(cfg)
+if phi_cand < mejor_phi - 1e-10:
+    mejor_phi, mejor = phi_cand, cfg
 ```
 
-Se acepta si `phi_cand < phi_total − ε`.
-
-### 6.3 Convergencia
-
-El proceso repite hasta que ningún movimiento mejora Phi, o hasta un máximo de
-20 pasadas. Al converger se garantiza un **óptimo local 1-move**: no existe
-ningún movimiento individual de un nodo que mejore la solución.
-
-### 6.4 Restricción
-
-Los singletons (grupos con un solo nodo) no pueden donar su nodo, ya que eso
-crearía un grupo vacío. Solo grupos con ≥ 2 nodos participan como donantes.
+Repite hasta convergencia o `max_iter` rondas (20 por defecto, 5 por nivel en k libre).
+Garantiza un óptimo local respecto a ambos vecindarios.
 
 ---
 
-## 7. Fase 3: candidatos de aislamiento
+## 8. Búsqueda Local Iterada (`_refinar_con_ils`)
 
-### 7.1 Motivación
-
-El greedy aglomerativo puede pasar por alto particiones donde k-1 nodos están
-completamente aislados, si en algún paso previo los fusionó con otros nodos por
-error local. Esta fase evalúa exhaustivamente todos esos candidatos.
-
-Se aplica **para todo N**: para k especificado, C(N, k-1) candidatos de ese k;
-para k libre, candidatos de todos los niveles k del historial.
-
-### 7.2 Generación de candidatos
-
-Para k partes y N nodos totales, se generan C(N, k-1) candidatos:
+Perturba el óptimo local (`_perturbar_bloques`, alternando movimientos futuros y
+presentes aleatorios) y re-refina, conservando el mejor Φ. Sus parámetros son
+**N-adaptativos** para acotar el tiempo sin perder calidad:
 
 ```python
-for aislados in combinations(range(N), k-1):
-    residual = nodos no en aislados
-    mascaras = [1 << a for a in aislados] + [máscara_residual]
-    yield mascaras
+max_it = max(5, 20 - max(0, self._N - HAMMING_EMD_MAX_N))
+n_ils  = max(1, _N_ILS - max(0, (self._N - 16) // 2))
+n_mov  = max(1, self._N // 4)
 ```
 
-Ejemplo para N=10, k=3: C(10,2) = 45 candidatos. Cada uno tiene 2 nodos
-aislados individualmente más un grupo residual con los 8 restantes.
-
-Para k libre con todos los niveles: Σₖ₌₂^{N-1} C(N, k-1) = 2^N − 2 candidatos.
-
-### 7.3 Evaluación y selección
-
-**k especificado:**
-
-```python
-for candidato_grupos in self._candidatos_aislamiento(k):
-    phi_cand = self._emd_particion(candidato_grupos)
-    if phi_cand < mejor_phi - 1e-10:
-        mejor_phi   = phi_cand
-        mejor_grupos = candidato_grupos
-mejor_phi, mejor_grupos = self._refinamiento_local(mejor_grupos, mejor_phi)
-```
-
-**k libre — búsqueda sobre todos los niveles:**
-
-```python
-for k_nivel in historico:
-    phi_r, grupos_r = _refinamiento_local(historico[k_nivel])
-    if k_nivel < N:
-        for candidato in _candidatos_aislamiento(k_nivel):
-            if _emd_particion(candidato) < phi_r - 1e-10:
-                phi_r, grupos_r = phi_cand, candidato
-        phi_r, grupos_r = _refinamiento_local(grupos_r, phi_r)
-    historico_refinado[k_nivel] = (phi_r, grupos_r)
-mejor_k = min({k: phi for k, (phi, _) in historico_refinado.items() if k >= 3})
-```
-
-QNodes puede retornar un k diferente al que el greedy había elegido inicialmente.
+`HAMMING_EMD_MAX_N` (=12) ya **no** selecciona métrica; sólo calibra cuántas
+iteraciones de ILS valen la pena para cada N.
 
 ---
 
-## 8. Método `_emd_particion`: EMD de la partición completa
+## 9. Evaluación de Φ (`_emd_bloques`)
 
-Recibe una lista de máscaras `grupos` y devuelve el Phi total de la partición.
-La métrica usada es la más precisa que el tamaño del sistema permite:
+Reconstruye la distribución marginal a partir de la distribución de cada bloque
+(futuro condicionado por su propio presente) y la compara con la original mediante
+**suma L1 marginal**, que es la Wasserstein-1 con Hamming **EXACTA** (ambas
+distribuciones son productos de marginales — ver `docs/optimizaciones.md`, §1):
 
 ```python
-def _emd_particion(grupos: list[int]) -> float:
-    # Construir distribución reconstruida (N componentes marginales)
-    dist_rec = np.empty(N, dtype=np.float64)
-    for mascara in grupos:
-        dist_parte = _dist_parte_efectiva(mascara)   # memoizada
-        for i in bits_activos(mascara):
-            dist_rec[i] = float(dist_parte[i])
+def _emd_bloques(self, bloques) -> float:
+    dist_rec = np.empty(self._N, dtype=np.float64)
+    for fut_pos, pre_pos in bloques:
+        if not fut_pos:
+            continue
+        dist_bloque = self._dist_bloque(fut_pos, pre_pos)   # memoizada
+        for p in fut_pos:
+            dist_rec[p] = float(dist_bloque[p])
+    return float(np.sum(np.abs(dist_rec - self.sia_dists_marginales)))   # O(N)
+```
 
-    # Métrica según tamaño — transparente para la estrategia
-    if N <= HAMMING_EMD_MAX_N:
-        # Wasserstein-1 con d_Hamming sobre el espacio conjunto 2^N
-        P = distribucion_conjunta_vectorizada(sia_dists_marginales)
-        Q = distribucion_conjunta_vectorizada(dist_rec)
-        return emd_causal(P, Q)
-    else:
-        # Suma L1 marginal sobre N nodos (rápida, tratable para N grande)
-        return np.sum(np.abs(dist_rec - sia_dists_marginales))
+Es **O(N)** por evaluación, da el mismo Φ que la EMD real, y vale para todo N sin
+restricción de tamaño.
+
+---
+
+## 10. Reconstrucción de la solución
+
+Al terminar, `mejor_bloques` se formatea con `fmt_k_bloques` (futuros en MAYÚSCULAS,
+presentes en minúsculas por bloque, ∅ si el mecanismo está vacío):
+
+```
+|  A,B  ||  C,D  || E |
+|  a,b  ||   c   || ∅ |
 ```
 
 ---
 
-## 9. Reconstrucción de la solución
-
-Al terminar, `mejor_grupos` contiene una lista de máscaras. Se reconstruye
-la distribución de la partición óptima:
-
-```python
-dist_reconstruida = np.empty(N, dtype=np.float32)
-for mascara in mejor_grupos:
-    dist_parte = _dist_parte_efectiva(mascara)
-    for i in _bits_activos(mascara):
-        dist_reconstruida[i] = float(dist_parte[i])
-```
-
-El resultado se formatea visualmente con marcos:
-
-```
-⎛A:B:C⎞⎛  D  ⎞⎛ E ⎞
-⎝a:b  ⎠⎝a:d:e⎠⎝ ∅ ⎠
-```
-
----
-
-## 10. Complejidad
+## 11. Complejidad
 
 | Fase | Complejidad | Nota |
 |---|---|---|
-| Agrupamiento greedy | O(N³) llamadas a `_emd_particion` | Siempre |
-| Refinamiento 1-move (k fijo) | O(N × k × iteraciones) llamadas | Siempre |
-| Candidatos de aislamiento (k fijo) | C(N, k-1) llamadas | Siempre |
-| Candidatos de aislamiento (k libre) | Σₖ₌₂^{N-1} C(N, k-1) = 2^N − 2 llamadas | k=None |
-| Refinamiento por nivel (k libre) | N−1 pasadas adicionales | k=None |
-| Una llamada `_emd_particion` (N ≤ 12) | O(2^N) — construye distribución conjunta | N ≤ 12 |
-| Una llamada `_emd_particion` (N > 12) | O(N) — suma L1 marginal | N > 12 |
+| Pool de cortes | O(N) | Una vez |
+| Mejor split | O(k · |pool|) = O(k · N) evaluaciones | Por paso del descenso |
+| Greedy top-down (k libre) | O(N² · N) = O(N³) evaluaciones | Un descenso, todos los k |
+| Refinamiento 1-move | O(rondas · (Σ|fut| + Σ|pre|) · k) | Futuro + presente |
+| ILS | n_ils × (refinamiento) | N-adaptativo |
+| Una evaluación `_emd_bloques` | **O(N)** | Exacta, todo N |
 
-**Para N = 10, k libre:**
-- Candidatos de aislamiento: 2¹⁰ − 2 = 1 022 candidatos
-- Refinamiento por nivel: 9 pasadas adicionales de 1-move
-- **Tiempo estimado: < 1 segundo**
-
-**Para N = 20, k libre:**
-- Candidatos de aislamiento: 2²⁰ − 2 ≈ 1M candidatos × O(20) cada uno
-- **Tiempo estimado: pocos segundos**
-
-**Para N = 25, k libre:**
-- Candidatos de aislamiento: 2²⁵ − 2 ≈ 33M candidatos × O(25) cada uno
-- **Tiempo estimado: decenas de segundos a pocos minutos**
-
-El agrupamiento exhaustivo (B&B) requería B(25) ≈ 4 × 10¹⁸ evaluaciones.
-El greedy aglomerativo lo reduce a ~2 600, un factor de reducción de ~10¹⁵.
-La búsqueda libre sobre todos los k añade O(2^N) evaluaciones adicionales.
+**Tiempos medidos** (estado='1000…0'): N10A ~0.2–0.5 s por k; N15A ~1 s; N20A k≥3
+~15–20 s, k=None ~60 s. Patrón Φ(k) ≈ (k−1)×~0.5.

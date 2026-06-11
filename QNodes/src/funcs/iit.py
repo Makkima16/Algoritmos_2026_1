@@ -16,7 +16,7 @@ from src.models.enums.distance import MetricDistance
 
 # Para N <= HAMMING_EMD_MAX_N se usa EMD real con matriz Hamming (igual que GeoMIP).
 # Para N > HAMMING_EMD_MAX_N se usa suma L1 marginal (aproximación rápida).
-HAMMING_EMD_MAX_N: int = 12
+HAMMING_EMD_MAX_N = 12
 
 _HAMMING_CACHE: dict[int, np.ndarray] = {}
 from src.models.enums.notation import Notation
