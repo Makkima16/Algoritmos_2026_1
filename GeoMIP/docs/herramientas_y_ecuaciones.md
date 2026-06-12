@@ -322,7 +322,7 @@ resultados finales de Φ, sólo la correspondencia entre índices enteros y esta
 | EMD (métrica única)     | **Suma L1 marginal = EMD Hamming exacta, todo N** | PyEMD / scipy.wasserstein | L1 es O(N), exacta para productos, sin límite de tamaño |
 | EMD para N grande       | Misma fórmula marginal O(N)          | Construir conjunta 2^N + solver O(4^N) | Imposible en memoria para N = 20+; e innecesario (es exacta) |
 | Producto tensorial      | Evitado (sólo verificación/export)   | PyTorch / TensorFlow                 | Φ no necesita la conjunta; basta la marginal O(N)    |
-| Motor de búsqueda       | **Greedy top-down asimétrico** + 1-move + ILS | Spectral (fallback) / Fuerza bruta | Pool O(N) compartido; cortes asimétricos coherentes  |
+| Motor de búsqueda       | **Greedy top-down asimétrico** + 1-move (determinista; ILS retirada 2026-06-12) | Spectral (fallback) / Fuerza bruta | Pool O(N) compartido; cortes asimétricos coherentes; sin partes `(∅,∅)` |
 | Paralelismo             | joblib (cpu_count - 1)               | multiprocessing puro / asyncio       | joblib maneja serialización y backends automáticamente |
 | Memoria para N ≥ 18     | LazyTPM por chunks                   | Cargar CSV completo en RAM           | N=20 → 2^20×20 valores ≈ 80MB mínimo, más copias     |
 | Memoización             | NCube._marginal_cache (frozenset)    | Ninguna / recomputar siempre         | Mismas marginalizaciones se piden decenas de veces   |

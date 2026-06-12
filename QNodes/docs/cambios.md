@@ -2,10 +2,11 @@
 
 **Referencia:** `projecto-analisis-20261/QNodes` → `AYDA_2026_1/QNodes`
 
-> **Estado actual (2026-06-10):** QNodes fue reescrito a un **motor asimétrico
-> unificado** (greedy top-down + refinamiento 1-move futuro/presente + ILS, con
-> métrica L1 marginal = EMD de Hamming exacta). Este documento describe el estado
-> vigente; las secciones finales conservan el historial de la evolución.
+> **Estado actual (2026-06-12):** QNodes es un **motor asimétrico unificado**
+> (greedy top-down + refinamiento 1-move futuro/presente + ILS, con métrica L1 marginal =
+> EMD de Hamming exacta). Desde 2026-06-12 el flag `permitir_presente_vacio` se respeta
+> correctamente (ver sección 1 e Historial). Este documento describe el estado vigente;
+> las secciones finales conservan el historial de la evolución.
 
 ---
 
@@ -19,7 +20,7 @@
 | Algoritmo principal | Greedy incremental k=2 | Greedy **top-down** + 1-move + ILS |
 | Métrica EMD | L1 marginal (asumida aproximación) | L1 marginal = **Wasserstein-1 Hamming EXACTA** |
 | Límite de tamaño | N ≤ ~12 (por la EMD) | Sin límite — L1 es O(N) para todo N |
-| Mecanismo vacío (∅) | No soportado | Soportado (corte `({i}, ∅)`) |
+| Mecanismo vacío (∅) | No soportado | Soportado (corte `({i}, ∅)`), **controlado por `permitir_presente_vacio`** |
 
 ---
 
@@ -112,8 +113,13 @@ El candidato y el estado inicial se ingresan una sola vez para todo el lote.
 
 QNodes y GeoMIP dan el **mismo Φ** para todo k, porque ambos comparten ahora:
 cortes asimétricos, greedy top-down con pool de cortes, refinamiento 1-move
-futuro/presente, ILS, y métrica L1 = EMD Hamming exacta. Si vuelve a aparecer un
+futuro/presente, y métrica L1 = EMD Hamming exacta. Si vuelve a aparecer un
 "salto" entre k consecutivos, sospechar de cortes simétricos colándose.
+
+> **Diferencia desde 2026-06-12:** **QNodes conserva la ILS** (Búsqueda Local Iterada),
+> mientras que **GeoMIP la retiró** (ver `GeoMIP/docs/decision_sin_ils.md`). Como la ILS
+> rara vez mejora el óptimo del 1-move, ambos siguen coincidiendo en Φ en la práctica;
+> GeoMIP es ahora determinista y algo más rápido.
 
 ---
 
@@ -130,6 +136,14 @@ Se descubrió que la L1 marginal es la EMD-Hamming exacta (no aproximación), lo
 permitió eliminar `pyemd` y el límite N ≤ 12. Se reemplazó el motor aglomerativo por el
 greedy top-down sobre bloques asimétricos `(futuros, presentes)`, con refinamiento
 1-move futuro/presente e ILS. Quedó un único motor para todo k, sin el salto k=2→k=3.
+
+**2026-06-12 — `permitir_presente_vacio` ahora tiene efecto.** El flag se asignaba a
+`self._permitir_presente_vacio` pero **nunca se leía**: el corte de mecanismo vacío
+`({i}, ∅)` (familia 3 del pool) se añadía siempre, así que el mecanismo ∅ aparecía aun
+cuando se pedía `False`. Ahora la familia 3 se genera **solo si el flag es `True`**.
+(QNodes ya garantizaba, vía `if not eff: return` en `_add` y las guardas de no vaciar el
+futuro en split/1-move/perturbación, que **nunca** se produce una parte `(∅, ∅)`; ese
+mismo bug sí existía en GeoMIP y se corrigió por separado.)
 
 ---
 

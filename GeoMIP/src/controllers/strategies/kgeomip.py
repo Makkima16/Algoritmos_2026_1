@@ -1028,6 +1028,7 @@ def _mejor_split_bloques(
     bloques: "list[Block]",
     cut_pool: "list[Block]",
     n_jobs: int = 1,
+    permitir_presente_vacio: bool = True,
 ) -> "Optional[tuple[float, list]]":
     """
     Find the best single block split over all (block, cut) combinations.
@@ -1046,7 +1047,13 @@ def _mejor_split_bloques(
         for cut_eff, cut_pre in cut_pool:
             inside: Block = (eff_block & cut_eff, pre_block & cut_pre)
             outside: Block = (eff_block - cut_eff, pre_block - cut_pre)
-            if not (inside[0] or inside[1]) or not (outside[0] or outside[1]):
+            # Invariante: ningún bloque puede quedar con el futuro (alcance) vacío.
+            # Un bloque sin futuro no representa nada y abre la puerta a partes (∅, ∅).
+            if not inside[0] or not outside[0]:
+                continue
+            # Si el mecanismo vacío NO está permitido, ningún bloque puede quedar
+            # con el presente vacío (cada parte usa el mecanismo de sus nodos).
+            if not permitir_presente_vacio and (not inside[1] or not outside[1]):
                 continue
             configs.append(bloques[:position] + [inside, outside] + bloques[position + 1:])
 
@@ -1071,6 +1078,7 @@ def _greedy_k_particion(
     cut_pool: "list[Block]",
     k: int,
     n_jobs: int = N_JOBS_INTERNOS,
+    permitir_presente_vacio: bool = True,
 ) -> "tuple[float, list[Block]]":
     """
     Top-down greedy k-partition: start with one block covering the full
@@ -1094,7 +1102,10 @@ def _greedy_k_particion(
     bloques: list = [(future_universe, present_universe)]
 
     while len(bloques) < k:
-        result = _mejor_split_bloques(subsistema, dist_original, bloques, cut_pool, n_jobs)
+        result = _mejor_split_bloques(
+            subsistema, dist_original, bloques, cut_pool, n_jobs,
+            permitir_presente_vacio=permitir_presente_vacio,
+        )
         if result is None:
             break
         _, bloques = result
@@ -1103,9 +1114,7 @@ def _greedy_k_particion(
     return loss, bloques
 
 
-# ── Refinamiento 1-move e ILS sobre bloques asimétricos (AYDA) ───────────
-
-N_ILS: int = 4  # Iteraciones de Búsqueda Local Iterada, documentadas en AYDA
+# ── Refinamiento 1-move sobre bloques asimétricos (AYDA) ─────────────────
 
 
 def _refinar_bloques_1move(
@@ -1113,6 +1122,7 @@ def _refinar_bloques_1move(
     dist_original: np.ndarray,
     bloques: "list[Block]",
     n_jobs: int = 1,
+    permitir_presente_vacio: bool = True,
 ) -> "tuple[float, list[Block]]":
     """
     Refinamiento 1-move sobre listas de bloques asimétricos (fases 3/4 de AYDA).
@@ -1166,6 +1176,9 @@ def _refinar_bloques_1move(
         # sin afectar la asignación futura de ese nodo. Explora el espacio
         # asimétrico imposible en representaciones simétricas como 20263.
         for i, (eff_i, pre_i) in enumerate(mejor_bloques):
+            # Si ∅ no está permitido, no vaciar el presente de un bloque.
+            if not permitir_presente_vacio and len(pre_i) <= 1:
+                continue
             for node in pre_i:
                 for j in range(k):
                     if i == j:
@@ -1193,59 +1206,6 @@ def _refinar_bloques_1move(
             mejoro = True
 
     return mejor_perdida, mejor_bloques
-
-
-def _perturbar_bloques(
-    bloques: "list[Block]",
-    n_movimientos: int = 2,
-    semilla: int = 42,
-) -> "list[Block]":
-    """
-    Perturba una lista de bloques para escapar de mínimos locales (ILS de AYDA).
-
-    Alterna aleatoriamente entre movimientos futuros y presentes, garantizando
-    que ningún bloque futuro quede vacío. El movimiento presente asimétrico es
-    exclusivo de AYDA y no tiene equivalente en 20263.
-
-    Args:
-        bloques      : Lista de Block = (frozenset futuros, frozenset presentes).
-        n_movimientos: Número de nodos a reubicar en la perturbación.
-        semilla      : Semilla para reproducibilidad entre iteraciones ILS.
-
-    Returns:
-        Nueva lista de Block perturbada.
-    """
-    rng = _random_module.Random(semilla)
-    result: "list[Block]" = [(frozenset(eff), frozenset(pre)) for eff, pre in bloques]
-    k = len(result)
-
-    for _ in range(n_movimientos):
-        tipo = rng.randint(0, 1)
-
-        if tipo == 0:  # movimiento futuro
-            candidatos = [i for i, (eff, _) in enumerate(result) if len(eff) > 1]
-            if not candidatos:
-                continue
-            i = rng.choice(candidatos)
-            eff_i, pre_i = result[i]
-            node = rng.choice(sorted(eff_i))
-            j = rng.choice([x for x in range(k) if x != i])
-            eff_j, pre_j = result[j]
-            result[i] = (eff_i - {node}, pre_i)
-            result[j] = (eff_j | {node}, pre_j)
-        else:  # movimiento presente (AYDA asimétrico)
-            candidatos = [i for i, (_, pre) in enumerate(result) if len(pre) > 0]
-            if not candidatos:
-                continue
-            i = rng.choice(candidatos)
-            eff_i, pre_i = result[i]
-            node = rng.choice(sorted(pre_i))
-            j = rng.choice([x for x in range(k) if x != i])
-            eff_j, pre_j = result[j]
-            result[i] = (eff_i, pre_i - {node})
-            result[j] = (eff_j, pre_j | {node})
-
-    return result
 
 
 def fmt_bloques(
@@ -1390,6 +1350,7 @@ class KGeoMIP(SIA):
                         self.sia_dists_marginales,
                         cut_pool,
                         test_k,
+                        permitir_presente_vacio=permitir_presente_vacio,
                     )
                     self.logger.critic(
                         f"  Greedy K={test_k} → pérdida={perdida_k:.6f}"
@@ -1403,33 +1364,16 @@ class KGeoMIP(SIA):
                         self.sia_dists_marginales,
                         bloques_k,
                         n_jobs=N_JOBS_INTERNOS,
+                        permitir_presente_vacio=permitir_presente_vacio,
                     )
                     self.logger.critic(
                         f"  +1-move K={test_k} perdida={perdida_k:.6f}"
                     )
 
-                    # ── Fase 4: ILS — N_ILS iteraciones de perturb+refine ──────────────
-                    # Escapa de mínimos locales del 1-move; documentado en AYDA,
-                    # ausente en 20263.
-                    for ils_iter in range(N_ILS):
-                        bloques_pert = _perturbar_bloques(
-                            bloques_k,
-                            n_movimientos=max(1, n_vars // 3),
-                            semilla=42 + ils_iter * 17 + test_k,
-                        )
-                        p_ils, b_ils = _refinar_bloques_1move(
-                            self.sia_subsistema,
-                            self.sia_dists_marginales,
-                            bloques_pert,
-                            n_jobs=N_JOBS_INTERNOS,
-                        )
-                        if p_ils < perdida_k - 1e-9:
-                            perdida_k = p_ils
-                            bloques_k = b_ils
-                            self.logger.critic(
-                                f"  +ILS iter {ils_iter+1} K={test_k} "
-                                f"mejora={perdida_k:.6f}"
-                            )
+                    # Nota: la Búsqueda Local Iterada (ILS) — perturbar el óptimo
+                    # local y re-refinar buscando "hacia los lados" — se retiró por
+                    # aportar mejoras marginales a un costo de tiempo alto.
+                    # Ver GeoMIP/docs/decision_sin_ils.md.
 
                     fmt_pk = fmt_bloques(
                         bloques_k,

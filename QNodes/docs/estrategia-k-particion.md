@@ -93,13 +93,21 @@ for i in range(self._N):
     pre = frozenset((i,)) if i < self._n_dims else frozenset()
     _add(eff, pre)                       # 1. aislamiento simétrico ({i}, {pre_i})
     _add(all_fut - eff, all_pre - pre)   # 2. su complemento
-    _add(eff, frozenset())               # 3. aislamiento con mecanismo vacío ({i}, ∅)
+    if self._permitir_presente_vacio:    # 3. solo si se permite mecanismo vacío
+        _add(eff, frozenset())           #    aislamiento con mecanismo vacío ({i}, ∅)
 ```
 
 La familia 3 (mecanismo vacío, estilo GeoMIP) es la que, al aplicarse a un bloque B,
 produce `inside=({i}, ∅)` dejando el mecanismo de i intacto en `outside` — i sigue
 condicionando al resto. El pool se comparte entre todos los splits y todos los niveles
 k del descenso.
+
+> **Cambio (2026-06-12):** la familia 3 ahora se genera **solo si**
+> `permitir_presente_vacio = True`. Antes el corte `({i}, ∅)` se añadía siempre, de modo
+> que el flag no tenía efecto y el mecanismo vacío aparecía aunque se pidiera `False`.
+> Con el flag en `False`, el pool ya no contiene cortes de mecanismo vacío. (El invariante
+> de `_add`, `if not eff: return`, garantiza además que **ningún corte tenga el futuro
+> vacío** → QNodes nunca produce partes `(∅, ∅)`.)
 
 ---
 
