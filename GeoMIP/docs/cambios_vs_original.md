@@ -61,23 +61,27 @@ particionados de forma **independiente**. El motor:
 ```
 _construir_cut_pool(...)   → O(N) cortes (3 familias por nodo), construido UNA vez
 _greedy_k_particion(...)   → desde 1 bloque, k-1 mejores splits del pool
-_refinar_bloques_1move(...) → 1-move futuro + 1-move presente (asimétrico)
-ILS (N_ILS=4)              → perturbar + re-refinar, conservar el mejor
+_refinar_bloques_1move(...) → 1-move futuro + 1-move presente (asimétrico) [fase final]
 ```
 
-Resultado: Φ coherente y mínimo real, idéntico a QNodes para todo k.
+Resultado: Φ coherente y mínimo real, idéntico a QNodes para todo k. Desde 2026-06-12 el
+motor es además **determinista** (se retiró la ILS — ver sección 9 y
+[`decision_sin_ils.md`](decision_sin_ils.md)).
 
 ---
 
-## 3. Refinamiento Local — Ausente vs. 1-Move Asimétrico + ILS
+## 3. Refinamiento Local — Ausente vs. 1-Move Asimétrico
 
 ### Original
 Sin refinamiento: la primera partición era la final.
 
 ### Actual
-- **1-move futuro:** mover un nodo futuro entre bloques.
+- **1-move futuro:** mover un nodo futuro entre bloques (sin vaciar el futuro del origen).
 - **1-move presente (asimétrico):** mover el mecanismo de un nodo sin tocar su futuro.
-- **ILS:** perturbación + re-refinamiento N_ILS = 4 veces, conservando el mejor Φ.
+
+> **Nota (2026-06-12):** antes existía una fase de **ILS** (perturbación +
+> re-refinamiento ×4) tras el 1-move; fue retirada por mejora marginal y costo alto.
+> El 1-move es ahora la fase final. Ver sección 9.
 
 ---
 
@@ -110,6 +114,11 @@ Over-cutting con penalizaciones artificiales cuando una parte quedaba sin presen
 El pool incluye el corte `({i}, ∅)`: el futuro del nodo i se evalúa sin mecanismo
 presente, dejando que el resto conserve su causalidad. En el pipeline fallback se marca
 con el centinela `-1`. Sin penalización falsa.
+
+El comportamiento está controlado por `permitir_presente_vacio` y ahora se **respeta en
+todo el camino greedy** (split, refinamiento): con `False`, ningún bloque puede quedar
+con presente ∅; con `True`, sí. En ningún caso un bloque puede quedar con el **futuro
+vacío**, lo que elimina partes degeneradas `(∅, ∅)`. Ver sección 9.
 
 ---
 
@@ -155,11 +164,36 @@ colapso de memoria. Además `_construir_tabla_costos` avisa y estima memoria si 
 | Costo por evaluación | — | O(N), sin límite de tamaño |
 | Particiones soportadas | Solo k = 2 | k = 2 hasta min(6, N) |
 | Representación | Listas simétricas | `Block = (frozenset futuros, frozenset presentes)` asimétrico |
-| Motor principal | Hill-climbing ciego | **Greedy top-down** + 1-move + ILS |
+| Motor principal | Hill-climbing ciego | **Greedy top-down** + 1-move (determinista) |
 | Generación de candidatos (fallback) | — | Spectral + Agglomerative + Aislamiento |
-| Refinamiento | Ninguno | 1-move futuro/presente + ILS |
-| Mecanismo vacío (∅) | Over-cutting | Corte `({i}, ∅)` riguroso |
+| Refinamiento | Ninguno | 1-move futuro/presente (ILS retirada — sección 9) |
+| Mecanismo vacío (∅) | Over-cutting | Corte `({i}, ∅)` riguroso; flag respetado; sin `(∅,∅)` |
 | Arquitectura | Funciones sueltas | OOP: System, NCube, KGeoMIP, Manager |
 | Paralelismo | Ninguno | joblib, cpu_count-1 núcleos por k |
 | Entrada | Excel fijo | Terminal interactivo + CSV en bloque |
 | Memoria | Carga total | LazyTPM por chunks para N ≥ 18 |
+
+---
+
+## 9. Changelog 2026-06-12 (correcciones y simplificación)
+
+Tres cambios al motor greedy top-down de `KGeoMIP`:
+
+1. **Bug `(∅, ∅)` corregido — invariante de futuro no vacío.**
+   `_mejor_split_bloques` permitía crear un bloque con el **futuro vacío** `(∅, presente)`;
+   el movimiento presente del refinamiento podía luego vaciar también su presente,
+   produciendo una parte degenerada `(∅, ∅)` (alcance **y** mecanismo vacíos) que bajaba Φ
+   artificialmente. Ahora **ningún split puede dejar un bloque sin futuro**, lo que vuelve
+   imposible el `(∅, ∅)`.
+
+2. **Flag `permitir_presente_vacio` respetado en el camino greedy.**
+   El flag estaba conectado a la firma de `aplicar_estrategia` pero **no se propagaba** al
+   greedy (split, 1-move, perturbación), así que el mecanismo ∅ aparecía siempre. Ahora se
+   enhebra por `_mejor_split_bloques`, `_greedy_k_particion` y `_refinar_bloques_1move`:
+   con `False`, ningún bloque queda con presente ∅; con `True`, sí.
+
+3. **Búsqueda Local Iterada (ILS) retirada.**
+   Se eliminaron la fase ILS, la función `_perturbar_bloques` y la constante `N_ILS`. La
+   ILS aportaba mejoras marginales (rara vez superaba a QNodes) a un costo de ~5× el
+   refinamiento, e introducía no-determinismo. El motor `greedy + 1-move` es ahora **más
+   rápido y determinista**. Documento dedicado: [`decision_sin_ils.md`](decision_sin_ils.md).

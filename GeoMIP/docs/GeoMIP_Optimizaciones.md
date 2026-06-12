@@ -78,14 +78,20 @@ El motor principal de `aplicar_estrategia` es greedy top-down sobre estos bloque
 ```
 1. _construir_cut_pool(...)  → pool de O(N) cortes, construido UNA vez, compartido por todo k
 2. _greedy_k_particion(...)  → desde 1 bloque (todo el subsistema), k−1 mejores splits
-3. _refinar_bloques_1move(...) → 1-move futuro + 1-move presente (asimétrico)
-4. ILS (N_ILS=4)             → perturbar + re-refinar, conservar el mejor
+3. _refinar_bloques_1move(...) → 1-move futuro + 1-move presente (asimétrico) [fase final]
 ```
+
+> **Cambio (2026-06-12):** se retiró la **ILS** (paso 4: perturbar + re-refinar ×4) por
+> ganancia marginal frente a su costo. El motor `greedy + 1-move` es ahora más rápido y
+> **determinista**. Ver [`decision_sin_ils.md`](decision_sin_ils.md).
 
 Cada split evalúa `inside = (b.fut ∩ c.fut, b.pre ∩ c.pre)` y
 `outside = (b.fut − c.fut, b.pre − c.pre)`, eligiendo el de menor Φ. El corte de
 **mecanismo vacío** `({i}, ∅)` deja que el nodo i siga condicionando causalmente al
-resto, sin penalización falsa.
+resto, sin penalización falsa. **Invariante (2026-06-12):** ningún bloque puede quedar
+con el **futuro vacío** (lo que eliminaba partes degeneradas `(∅, ∅)`); y si
+`permitir_presente_vacio = False`, tampoco con el **presente vacío** (el flag se respeta
+en split y refinamiento).
 
 ### Impacto
 
@@ -164,21 +170,25 @@ no satura el bus de memoria y maximiza el rendimiento por tarea.
 
 ---
 
-## 6. Refinamiento presente asimétrico + ILS (más preciso)
+## 6. Refinamiento presente asimétrico (más preciso)
 
-**Archivo:** `src/controllers/strategies/kgeomip.py` — `_refinar_bloques_1move`,
-`_perturbar_bloques`
+**Archivo:** `src/controllers/strategies/kgeomip.py` — `_refinar_bloques_1move`
 
 El refinamiento 1-move explora **dos** tipos de movimiento, el segundo exclusivo de la
 representación asimétrica:
 
-- **Movimiento futuro:** traslada un nodo futuro del bloque i al j.
+- **Movimiento futuro:** traslada un nodo futuro del bloque i al j (sin vaciar el futuro
+  del bloque origen).
 - **Movimiento presente (asimétrico):** traslada un nodo del lado presente sin tocar
-  su par futuro — imposible en cortes simétricos.
+  su par futuro — imposible en cortes simétricos. Si `permitir_presente_vacio = False`,
+  no se permite vaciar el presente de un bloque.
 
-Tras converger, la **ILS** (N_ILS = 4) perturba alternando movimientos futuros y
-presentes, y re-refina, conservando siempre el mejor Φ. Ambos amplían el espacio
-explorado y bajan Φ por debajo del mínimo local del 1-move clásico.
+Este es el **paso final** del motor: el movimiento presente asimétrico amplía el espacio
+explorado y baja Φ por debajo del mínimo local del 1-move clásico.
+
+> **Cambio (2026-06-12):** la **ILS** (`_perturbar_bloques` + re-refinar ×4) que seguía a
+> esta fase fue **retirada** por mejora marginal a costo alto, y dejó el motor
+> determinista. Detalle en [`decision_sin_ils.md`](decision_sin_ils.md).
 
 ---
 
@@ -215,7 +225,8 @@ cachés y los pools de joblib antes de la primera prueba.
 | Tabla de costos vectorizada (BFS + popcount + chunks) | Llenado O(n_dims·2^n_dims) | ⭐⭐ | — |
 | `particionar()` de una pasada | k bipartir → 1 pasada | ⭐⭐ | — |
 | Paralelismo joblib por k | Todos los núcleos por test | ⭐⭐ | — |
-| Refinamiento presente + ILS | Vecindario asimétrico + escape de mínimos | ⭐ | ⭐⭐ |
+| Refinamiento presente 1-move (asimétrico) | Vecindario asimétrico; baja Φ | ⭐ | ⭐⭐ |
+| Retiro de ILS (2026-06-12) | Menos ~5× del refinamiento; determinista | ⭐⭐ | — (Φ equivalente) |
 | LazyTPM (N ≥ 18) | Evita Out-of-Memory | — | — (habilita N grande) |
 
 Las dos primeras filas son las que hacen a GeoMIP simultáneamente más rápido **y** más

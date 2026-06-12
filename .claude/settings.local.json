@@ -36,7 +36,14 @@
       "Bash(ls GeoMIP/src/models/base)",
       "Bash(ls QNodes/src/models/base)",
       "Bash(\".venv/Scripts/python.exe\" \"data_scripts/_worker_motor.py\" /tmp/lote_test.json)",
-      "Bash(\".venv/Scripts/python.exe\" \"data_scripts/run_suite_2026.py\")"
+      "Bash(\".venv/Scripts/python.exe\" \"data_scripts/run_suite_2026.py\")",
+      "Bash(git ls-tree *)",
+      "Bash(../.venv/Scripts/python.exe -c ' *)",
+      "Bash(../.venv/Scripts/python.exe review/validar_fuerza_bruta.py)",
+      "Bash(ls data/samples_binary/)",
+      "Bash(ls data/samples_no_binary/)",
+      "Bash(ls data/)",
+      "Bash(../.venv/Scripts/python.exe -c *)"
     ]
   }
 }

@@ -139,12 +139,18 @@ for i in range(self._N):
     pre = frozenset((i,)) if i < self._n_dims else frozenset()
     _add(eff, pre)                    # 1. aislamiento simétrico ({i}, {pre_i})
     _add(all_fut - eff, all_pre - pre)  # 2. su complemento
-    _add(eff, frozenset())            # 3. aislamiento con mecanismo vacío ({i}, ∅)
+    if self._permitir_presente_vacio:   # 3. solo si se permite mecanismo vacío
+        _add(eff, frozenset())          #    aislamiento con mecanismo vacío ({i}, ∅)
 ```
 
-Tres familias por nodo → **3N cortes** en total, deduplicados. Construir el pool es
-O(N); el costo se **amortiza** entre todos los splits y todos los niveles k del
-descenso, en vez de regenerarse en cada paso.
+Hasta **3N cortes** en total, deduplicados (la familia 3 solo cuando
+`permitir_presente_vacio = True`). Construir el pool es O(N); el costo se **amortiza**
+entre todos los splits y todos los niveles k del descenso, en vez de regenerarse en cada
+paso.
+
+> **Cambio (2026-06-12):** la familia 3 se condiciona al flag `permitir_presente_vacio`.
+> Antes se añadía siempre, dejando el flag sin efecto (el mecanismo vacío aparecía aun
+> con `False`). Ahora con `False` el pool no contiene cortes `({i}, ∅)`.
 
 ---
 

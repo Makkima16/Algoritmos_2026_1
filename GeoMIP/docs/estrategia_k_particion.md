@@ -45,11 +45,15 @@ ENTRADA: subsistema condicionado, valores de k (k dado, o [2..min(6,N)] si k=Non
 │     3. _greedy_k_particion(...)   → desde 1 bloque (todo el subsistema),
 │                                      aplicar k-1 mejores splits del pool
 │     4. _refinar_bloques_1move(...) → 1-move FUTURO + 1-move PRESENTE (asimétrico)
-│     5. ILS (N_ILS = 4)            → perturbar (futuro/presente) + re-refinar,
-│                                      conservar el mejor Φ
+│                                      [fase final — sin ILS, ver más abajo]
 │
 └── Elegir la k con Φ mínimo global → k-MIP
 ```
+
+> **Cambio (2026-06-12):** se **retiró la Búsqueda Local Iterada (ILS)** que antes
+> ocupaba el paso 5 (perturbar + re-refinar ×4). Aportaba mejoras marginales a un
+> costo de ~5× el refinamiento, y dejó al motor **determinista**. Detalle y evidencia
+> en [`decision_sin_ils.md`](decision_sin_ils.md).
 
 ### El pool de cortes (`_construir_cut_pool`)
 
@@ -72,6 +76,16 @@ outside = (b.F − c.F,  b.P − c.P)
 
 Se evalúa Φ (`evaluar_bloques`) de cada configuración candidata en paralelo (joblib) y
 se elige el split de menor pérdida.
+
+**Invariantes de validez de un split (2026-06-12):**
+
+- **Ningún bloque puede quedar con el futuro (alcance) vacío** — `inside.F` y `outside.F`
+  deben ser no vacíos. Un bloque sin futuro no representa nada y abría la puerta a partes
+  degeneradas `(∅, ∅)` (futuro **y** presente vacíos), que ahora son imposibles.
+- Si `permitir_presente_vacio = False`, además **ningún bloque puede quedar con el
+  presente (mecanismo) vacío** — el flag se respeta en todo el camino greedy (split,
+  refinamiento 1-move y, antes, la perturbación). Con `True`, el presente ∅ sí se
+  permite, pero el futuro nunca queda vacío.
 
 ---
 
@@ -98,17 +112,19 @@ pérdida de precisión y **sin límite de tamaño**. (Detalle en `GeoMIP_Optimiz
 
 ---
 
-## Refinamiento 1-move asimétrico e ILS
+## Refinamiento 1-move asimétrico (fase final)
 
 `_refinar_bloques_1move` explora dos vecindarios hasta convergencia:
 
-- **Movimiento futuro:** traslada un nodo futuro del bloque i al j.
+- **Movimiento futuro:** traslada un nodo futuro del bloque i al j (no vacía el futuro
+  del bloque origen).
 - **Movimiento presente (asimétrico):** traslada un nodo del lado presente sin tocar su
-  par futuro — imposible en cortes simétricos.
+  par futuro — imposible en cortes simétricos. Si `permitir_presente_vacio = False`, no
+  se permite vaciar el presente de un bloque.
 
-La **ILS** perturba (`_perturbar_bloques`, alternando movimientos futuro/presente) y
-re-refina N_ILS = 4 veces, conservando el mejor Φ global, para escapar de mínimos
-locales.
+Este es el **último paso** del motor. La antigua **ILS** (perturbar + re-refinar ×4) se
+retiró por ganancia marginal y costo alto; ver [`decision_sin_ils.md`](decision_sin_ils.md).
+El resultado es **determinista**: misma entrada → misma partición.
 
 ---
 
@@ -134,7 +150,7 @@ defecto:
   de la tabla de costos, con varias semillas.
 - **AgglomerativeClustering** (average/complete/single linkage).
 - **Aislamiento heurístico** C(N, k-1) y variantes con mecanismo vacío (centinela -1).
-- Evaluación paralela + refinamiento 1-move + ILS.
+- Evaluación paralela + refinamiento 1-move.
 
 Si scikit-learn no está disponible, hay un fallback jerárquico bottom-up determinista.
 
@@ -158,5 +174,5 @@ Como el descenso greedy es anidado, Φ resulta coherente entre k consecutivos, s
 
 Sistema ABC, estado `101`. Pool de cortes incluye `({A},{a})`, `({A},∅)`, complementos,
 y el mejor corte geométrico. El greedy parte de `({A,B,C},{a,b,c})` y aplica el split de
-menor Φ, p.ej. `({C},{c}) | ({A,B},{a,b})`. El 1-move (futuro y presente) y la ILS
-intentan mejorar; si ninguno baja Φ, esa es la k-MIP para k=2.
+menor Φ, p.ej. `({C},{c}) | ({A,B},{a,b})`. El 1-move (futuro y presente) intenta
+mejorar; si ningún movimiento baja Φ, esa es la k-MIP para k=2.

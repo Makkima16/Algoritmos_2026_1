@@ -32,9 +32,12 @@ se usa (o no) cada paradigma.
 ```
 _construir_cut_pool(...)   → pool de O(N) cortes, construido UNA vez, compartido por todo k
 _greedy_k_particion(...)   → desde 1 bloque (todo el subsistema), k-1 mejores splits
-_refinar_bloques_1move(...) → 1-move futuro + 1-move presente (asimétrico)
-ILS (N_ILS=4)              → perturbar + re-refinar, conservar el mejor Φ
+_refinar_bloques_1move(...) → 1-move futuro + 1-move presente (asimétrico) [fase final]
 ```
+
+> **Cambio (2026-06-12):** la **ILS** (perturbar + re-refinar ×4) que cerraba el
+> pipeline fue **retirada** por ganancia marginal y costo alto; el motor es ahora
+> **determinista**. Ver [`decision_sin_ils.md`](decision_sin_ils.md).
 
 El punto clave que vuelve **tratable** el top-down divisivo (que la sección 6 descartaba por
 "evaluar O(2^N) cortes en el primer nivel") es que **no** se evalúan todos los cortes posibles:
@@ -81,9 +84,10 @@ Genera C(N, k-1) candidatos aislando exactamente k-1 nodos individualmente. En m
 los casos reales, la MIP exacta para k=2 se encuentra entre estos N candidatos, porque el corte
 óptimo suele aislar el nodo con menor integración causal.
 
-**d) Iterated Local Search (ILS) — Metaheurística**
+**d) Iterated Local Search (ILS) — Metaheurística — RETIRADA (2026-06-12)**
 
-Es una **metaheurística**: combina búsqueda local con perturbación para escapar de mínimos locales:
+Era una **metaheurística** que combinaba búsqueda local con perturbación para escapar de
+mínimos locales:
 
 ```
 Repetir N_ILS = 4 veces:
@@ -91,6 +95,12 @@ Repetir N_ILS = 4 veces:
     Refinar con 1-move hasta convergencia local
     Si mejora → actualizar mejor solución global
 ```
+
+**Se retiró** porque sobre el espacio de pruebas mejoraba muy rara vez el Φ ya
+alcanzado por `greedy + 1-move` (y casi nunca superaba a QNodes), a un costo de ~5× el
+refinamiento, además de introducir no-determinismo por la perturbación aleatoria. El
+motor quedó como `greedy + 1-move`, **más rápido y determinista**. Detalle y evidencia
+en [`decision_sin_ils.md`](decision_sin_ils.md).
 
 ### ¿Por qué heurística y no algo exacto?
 
@@ -165,8 +175,11 @@ Cada fusión es irreversible: es una decisión voraz pura.
 
 ### Limitación del Greedy en este contexto
 
-El 1-move greedy **garantiza un mínimo local**, no global. Por eso se complementa con ILS
-(perturbación + re-refinamiento): para escapar de los mínimos locales superficiales.
+El 1-move greedy **garantiza un mínimo local**, no global. Antes se complementaba con ILS
+(perturbación + re-refinamiento) para escapar de mínimos locales, pero esa fase se retiró
+(ver [`decision_sin_ils.md`](decision_sin_ils.md)): en la práctica el óptimo local del
+1-move ya coincide con la mejor partición que GeoMIP encontraría, y la ILS solo añadía
+tiempo y no-determinismo.
 
 ---
 
@@ -387,8 +400,8 @@ el dendrograma a distintas alturas. Esto amortiza el costo del clustering entre 
 | `AgglomerativeClustering` (fallback) | Bottom-Up   | Estructura local entre pares → construir hacia arriba es natural y eficiente |
 | Fallback jerárquico (`_evaluar_k_completo`) | Bottom-Up + Greedy | Fusionar el par de menor pérdida cuando no hay sklearn |
 | Spectral Clustering (fallback)    | Global (ni B-U ni T-D) | Opera sobre el espectro de la matriz de afinidad completa; no es recursivo |
-| Refinamiento 1-move (futuro+presente) | Greedy local | Explorar vecinos del punto actual; no requiere recorrido del árbol |
-| ILS (Iterated Local Search)       | Metaheurística | Perturb + refine; escapa de mínimos locales del 1-move          |
+| Refinamiento 1-move (futuro+presente) | Greedy local | Explorar vecinos del punto actual; no requiere recorrido del árbol; **fase final** del motor |
+| ~~ILS (Iterated Local Search)~~   | ~~Metaheurística~~ | **Retirada (2026-06-12)** — ganancia marginal y costo alto; ver `decision_sin_ils.md` |
 
 ---
 
@@ -401,7 +414,7 @@ el dendrograma a distintas alturas. Esto amortiza el costo del clustering entre 
 | **Greedy Top-Down (divisivo)** | **SÍ (motor principal)** | `_greedy_k_particion`: divide en k-1 splits sobre un pool de O(N) cortes; jerarquía anidada coherente entre k |
 | **Heurística/Aproximación**| SÍ (fallback)         | Spectral + Agglomerative + Aislamiento generan candidatos sin explorar el espacio completo |
 | **Greedy (Voraz)**         | SÍ (búsqueda + refinamiento) | Greedy top-down (búsqueda) + 1-move Hill Climbing futuro/presente (refinamiento) |
-| **Metaheurística (ILS)**   | SÍ                    | Perturbación + re-refinamiento N_ILS=4; escapa de mínimos locales |
+| **Metaheurística (ILS)**   | **NO (retirada 2026-06-12)** | Aportaba mejora marginal a costo ~5×; el `greedy + 1-move` determinista la reemplaza — ver `decision_sin_ils.md` |
 | **DP Top-Down (Memo)**     | SÍ (parcial)          | `NCube.marginalizar()` paga sólo por lo que se computa |
 | **DP Bottom-Up**           | NO (para k-MIP global)| k-MIP no tiene subestructura óptima: la mejor k-partición no se construye desde (k-1)-particiones óptimas |
 | **Bottom-Up (clustering)** | SÍ (fallback)         | Agglomerative y fallback jerárquico cuando no hay sklearn |

@@ -28,7 +28,7 @@ class Application:
         self.notacion_indexado: str = Notation.LIL_ENDIAN.value
         self.tiempo_emd: str = TimeEMD.EMD_EFECTO.value
         self.modo_estados: bool = ACTIVE
-        self.profiler_habilitado: bool = True
+        self.profiler_habilitado: bool = False
 
     def set_pagina_red_muestra(self, pagina: str):
         self.pagina_red_muestra = pagina

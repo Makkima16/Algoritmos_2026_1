@@ -15,6 +15,11 @@ BRUTEFORCE_STRAREGY_TAG: str = f"{BRUTEFORCE_LABEL}_strategy"
 BRUTEFORCE_ANALYSIS_TAG: str = f"{BRUTEFORCE_LABEL}_analysis"
 BRUTEFORCE_FULL_ANALYSIS_TAG: str = f"{BRUTEFORCE_LABEL}_full_analysis"
 
+# Fuerza Bruta k-MIP (ground truth exhaustivo para k-particiones asimétricas)
+BRUTEFORCE_KMIP_LABEL: str = "BruteForce-kMIP"
+BRUTEFORCE_KMIP_STRAREGY_TAG: str = f"{BRUTEFORCE_KMIP_LABEL}_strategy"
+BRUTEFORCE_KMIP_ANALYSIS_TAG: str = f"{BRUTEFORCE_KMIP_LABEL}_analysis"
+
 # Pyphi
 PYPHI_LABEL: str = "Pyphi"
 PYPHI_STRAREGY_TAG: str = f"{PYPHI_LABEL}_strategy"

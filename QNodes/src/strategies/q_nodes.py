@@ -126,6 +126,8 @@ class QNodes(SIA):
         self._cache_bloque: dict[tuple, np.ndarray] = {}
         self._idx: np.ndarray = np.array([], dtype=np.int8)
         self._dims: np.ndarray = np.array([], dtype=np.int8)
+        # Última k-partición ganadora (expuesta para validación/comparación externa).
+        self.mejor_bloques: list = []
 
     @profile(context={TYPE_TAG: QNODES_ANALYSIS_TAG})
     def aplicar_estrategia(
@@ -190,6 +192,9 @@ class QNodes(SIA):
             mejor_phi, mejor_bloques = historico_refinado[mejor_k]
             mejor_phi, mejor_bloques = self._refinar_con_ils(mejor_bloques, mejor_phi)
 
+        # Expone la k-partición ganadora para comparación externa (validación).
+        self.mejor_bloques = mejor_bloques
+
         # Reconstrucción de la distribución de la partición óptima.
         dist_reconstruida = np.empty(self._N, dtype=np.float32)
         for fut_pos, pre_pos in mejor_bloques:
@@ -245,7 +250,8 @@ class QNodes(SIA):
             pre = frozenset((i,)) if i < self._n_dims else frozenset()
             _add(eff, pre)
             _add(all_fut - eff, all_pre - pre)
-            _add(eff, frozenset())  # corte de mecanismo vacío
+            if self._permitir_presente_vacio:
+                _add(eff, frozenset())  # corte de mecanismo vacío (solo si se permite)
 
         return pool
 
