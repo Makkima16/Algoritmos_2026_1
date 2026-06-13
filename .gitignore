@@ -1,12 +1,14 @@
-# Python
+# ──────────────────────────────────────────────────────────────
+#  Python
+# ──────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
 build/
-develop-eggs/
 dist/
+develop-eggs/
 downloads/
 eggs/
 .eggs/
@@ -19,83 +21,76 @@ wheels/
 pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
+.installed.cfg
 MANIFEST
 
-# Virtual environments
+# ──────────────────────────────────────────────────────────────
+#  Entornos virtuales / gestores
+# ──────────────────────────────────────────────────────────────
+.venv/
 venv/
-ENV/
 env/
-.venv
-
-# uv
+ENV/
 .uv/
 uv.lock
 
-# CPython
-.pyc
-.pyo
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Testing
+# ──────────────────────────────────────────────────────────────
+#  Testing
+# ──────────────────────────────────────────────────────────────
 .pytest_cache/
 .coverage
 htmlcov/
 
-# Distribution
-dist/
-build/
+# ──────────────────────────────────────────────────────────────
+#  IDE / Editores
+# ──────────────────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*.sw?
+*~
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.local
 
-.log
-/review
-.logs
-.assets
-
-
-/GeoMIP/results
-/GeoMIP/data/samples_no_binary
-/GeoMIP/data/samples_binary
-/GeoMIP/viewer/public/results
-/GeoMIP/data/Pruebas
-
-# QNodes
-/QNodes/data
-
-#root
-/data_scripts
-DatosPruebas2026_1.xlsx
-
-# Logs
-logs
-*.log
+# ──────────────────────────────────────────────────────────────
+#  Node / Frontend (dashboard/)
+# ──────────────────────────────────────────────────────────────
+node_modules/
+dist-ssr/
+.npm
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
+# ──────────────────────────────────────────────────────────────
+#  Logs / Profiling / SO
+# ──────────────────────────────────────────────────────────────
+*.log
+.logs/
+logs/
+.assets/
+/review/
 .DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-# Optional npm cache directory
-.npm
+
+# ──────────────────────────────────────────────────────────────
+#  Datos pesados — NO versionar las TPMs de muestra
+#  (los scripts de data/ y data/Pruebas/ SÍ se versionan)
+# ──────────────────────────────────────────────────────────────
+/data/samples_binary/
+/data/samples_no_binary/
+
+# ──────────────────────────────────────────────────────────────
+#  Resultados (se generan en cada ejecución)
+# ──────────────────────────────────────────────────────────────
+/KGeoMIP/results/
+/KQNodes/results/
+/results_test/
+DatosPruebas2026_1.xlsx

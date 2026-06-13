@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api, ejecutarBloque } from "../api.js";
-import { fmt, formatearTiempo } from "../lib/metrics.js";
+import { fmt, pct, bandaColor, formatearTiempo } from "../lib/metrics.js";
 import MetricCards from "../components/MetricCards.jsx";
 import DistribucionChart from "../components/DistribucionChart.jsx";
 import CohesionTable from "../components/CohesionTable.jsx";
@@ -141,8 +141,8 @@ export default function Ejecutar() {
           <div className="col">
             <label>Algoritmo</label>
             <select value={algo} onChange={(e) => setAlgo(e.target.value)}>
-              <option value="qnodes">QNodes</option>
-              <option value="geomip">GeoMIP</option>
+              <option value="qnodes">KQNodes</option>
+              <option value="geomip">KGeoMIP</option>
             </select>
           </div>
           <div className="col">
@@ -246,7 +246,7 @@ export default function Ejecutar() {
             <strong>Progreso {progreso.idx}/{progreso.total}</strong>
             {resumen && (
               <span className="muted">
-                ✓ {resumen.exitosas} ok · {resumen.con_error} error · {resumen.tiempo_total_fmt}
+                ✓ {resumen.exitosas} ok · {resumen.con_error} error · búsqueda {resumen.tiempo_busqueda_fmt} · arranque {resumen.tiempo_arranque_fmt}
               </span>
             )}
           </div>
@@ -255,7 +255,7 @@ export default function Ejecutar() {
           <div className="scroll">
             <table>
               <thead>
-                <tr><th>#</th><th>Alcance</th><th>Mecanismo</th><th>Φ</th><th>Tiempo</th><th>Partición</th></tr>
+                <tr><th>#</th><th>Alcance</th><th>Mecanismo</th><th>Φ</th><th>Φ rel</th><th>Banda</th><th>Tiempo</th><th>Partición</th></tr>
               </thead>
               <tbody>
                 {filas.map((f, i) => (
@@ -264,6 +264,8 @@ export default function Ejecutar() {
                     <td className="mono">{f.alcance}</td>
                     <td className="mono">{f.mecanismo}</td>
                     <td>{f.error ? "—" : fmt(f.perdida)}</td>
+                    <td>{f.error ? "—" : fmt(f.phi_relativo)}</td>
+                    <td>{f.error ? "—" : <span className={`pill ${bandaColor(f.banda)}`}>{f.banda}</span>}</td>
                     <td>{f.error ? "—" : (f.tiempo_fmt || formatearTiempo(f.tiempo_seg))}</td>
                     <td className="particion" style={{ maxWidth: 280, overflow: "hidden" }}>
                       {f.error ? `ERROR: ${f.error}` : f.particion}
@@ -273,9 +275,60 @@ export default function Ejecutar() {
               </tbody>
             </table>
           </div>
+
+          {resumen && <BloqueMetricas r={resumen} />}
           {resumen && <p className="muted">Guardado en: <span className="mono">{resumen.salida}</span></p>}
         </div>
       )}
+    </div>
+  );
+}
+
+// Métricas agregadas del lote: calidad de Φ, tiempos (incluido arranque/warmup
+// separado del de búsqueda) y tasa de éxito.
+function BloqueMetricas({ r }) {
+  const b = r.bandas || { baja: 0, media: 0, alta: 0 };
+  return (
+    <div style={{ marginTop: 14 }}>
+      <h4 style={{ margin: "6px 0" }}>Métricas del lote</h4>
+      <div className="metric-grid">
+        <div className="metric">
+          <div className="v">{pct(r.tasa_exito, 0)}</div>
+          <div className="l">Tasa de éxito ({r.exitosas}/{r.total})</div>
+        </div>
+        <div className="metric">
+          <div className="v">{fmt(r.phi_promedio)}</div>
+          <div className="l">Φ promedio (Σ {fmt(r.phi_total)})</div>
+        </div>
+        <div className="metric">
+          <div className="v">{pct(r.phi_relativo_promedio)}</div>
+          <div className="l">Pérdida relativa promedio (Φ / masa)</div>
+        </div>
+        <div className="metric">
+          <div className="v">
+            <span className="pill baja">{b.baja}</span>{" "}
+            <span className="pill media">{b.media}</span>{" "}
+            <span className="pill alta">{b.alta}</span>
+          </div>
+          <div className="l">Pruebas por banda (baja / media / alta)</div>
+        </div>
+        <div className="metric">
+          <div className="v">{r.tiempo_busqueda_fmt}</div>
+          <div className="l">Tiempo de búsqueda (Σ pruebas)</div>
+        </div>
+        <div className="metric">
+          <div className="v">{r.tiempo_promedio_fmt}</div>
+          <div className="l">Tardanza promedio por prueba</div>
+        </div>
+        <div className="metric">
+          <div className="v">{r.tiempo_arranque_fmt}</div>
+          <div className="l">Arranque del motor (warmup)</div>
+        </div>
+        <div className="metric">
+          <div className="v">{r.tiempo_total_fmt}</div>
+          <div className="l">Tiempo total (wall-clock)</div>
+        </div>
+      </div>
     </div>
   );
 }

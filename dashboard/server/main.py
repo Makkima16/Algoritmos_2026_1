@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Backend FastAPI del dashboard QNodes & GeoMIP.
+Backend FastAPI del dashboard KQNodes & KGeoMIP.
 
 - Mantiene dos workers persistentes (uno por algoritmo), precargados al arranque
   ("ya en ejecución, anclados a modo manual": una corrida por petición).
@@ -23,7 +23,7 @@ import results_reader as R
 from block_writer import escribir_xlsx_bloque, formatear_tiempo
 from workers import pool, ALGO_ROOTS
 
-app = FastAPI(title="QNodes & GeoMIP Dashboard")
+app = FastAPI(title="KQNodes & KGeoMIP Dashboard")
 
 app.add_middleware(
     CORSMiddleware,
@@ -140,6 +140,37 @@ def block(req: BlockReq):
         total = len(filas_csv)
         yield _evento("inicio", {"total": total, "salida": str(ruta_salida)})
         resultados = []
+
+        # Arranque del motor (warmup): la PRIMERA corrida real de un worker paga
+        # costos de una sola vez (primer toque de numpy, construcción de tablas,
+        # carga/caché de la TPM, JIT). Si ese costo cayera dentro de la primera
+        # prueba, su tiempo quedaría inflado y engañoso. Por eso ejecutamos una
+        # corrida de calentamiento DESCARTABLE antes del lote, con los parámetros
+        # de la primera prueba válida, y la contabilizamos aparte como "arranque".
+        # Tras ello, TODAS las pruebas (incluida la primera) miden solo su búsqueda.
+        tiempo_warmup_acum = 0.0
+        fila_warm = next(
+            (f for f in filas_csv if f.get("alcance") and f.get("mecanismo")), None
+        )
+        if fila_warm is not None:
+            pet_warm = {
+                "algo": req.algo,
+                "ruta_tpm": req.ruta_tpm,
+                "estado": req.estado,
+                "candidato": req.candidato,
+                "alcance": R.letras_a_binario(fila_warm["alcance"], req.n),
+                "mecanismo": R.letras_a_binario(fila_warm["mecanismo"], req.n),
+                "k": req.k,
+                "permitir_presente_vacio": req.permitir_presente_vacio,
+            }
+            t_warm = time.time()
+            worker.run(pet_warm)  # resultado descartado: solo calienta el motor
+            tiempo_warmup_acum = time.time() - t_warm
+            yield _evento("warmup", {"tiempo_arranque": tiempo_warmup_acum})
+
+        # Acumulado de tiempo de búsqueda (suma por prueba); el wall-clock del lote
+        # (t0) arranca aquí para que el arranque del motor quede fuera de él.
+        tiempo_busqueda_acum = 0.0
         t0 = time.time()
 
         for idx, fila in enumerate(filas_csv, start=1):
@@ -177,12 +208,24 @@ def block(req: BlockReq):
                 continue
 
             tiempo_seg = float(resp.get("tiempo_total_segundos", 0.0))
+            tiempo_prep = float(resp.get("tiempo_preparacion_segundos", 0.0))
+            tiempo_busqueda_acum += tiempo_seg
+            perdida = float(resp["perdida_phi"])
+            # Pérdida relativa (Φ/masa) y banda cualitativa por prueba → "precisión".
+            rel = M.perdida_relativa(
+                M._as_list(resp.get("distribucion_subsistema")),
+                M._as_list(resp.get("distribucion_particion")),
+                perdida,
+            )
             fila_res = {
                 **base,
                 "particion": resp["particion"],
-                "perdida": float(resp["perdida_phi"]),
+                "perdida": perdida,
+                "phi_relativo": rel["phi_relativo"],
+                "banda": rel["banda"],
                 "tiempo_fmt": formatear_tiempo(tiempo_seg),
                 "tiempo_seg": tiempo_seg,
+                "tiempo_prep": tiempo_prep,
                 "error": None,
             }
             resultados.append(fila_res)
@@ -190,17 +233,36 @@ def block(req: BlockReq):
 
         tiempo_total = time.time() - t0
         try:
-            escribir_xlsx_bloque(ruta_salida, resultados, tiempo_total)
+            escribir_xlsx_bloque(ruta_salida, resultados, tiempo_total, tiempo_warmup_acum)
         except Exception as e:  # noqa: BLE001
             yield _evento("error", {"mensaje": f"No se pudo escribir el XLSX: {e}"})
 
-        exitosas = sum(1 for r in resultados if not r.get("error"))
+        ok = [r for r in resultados if not r.get("error")]
+        exitosas = len(ok)
+        n_phi = [r["perdida"] for r in ok]
+        n_rel = [r["phi_relativo"] for r in ok if r.get("phi_relativo") is not None]
+        bandas = {"baja": 0, "media": 0, "alta": 0}
+        for r in ok:
+            b = r.get("banda")
+            if b in bandas:
+                bandas[b] += 1
         yield _evento("fin", {
             "total": total,
             "exitosas": exitosas,
             "con_error": total - exitosas,
+            "tasa_exito": (exitosas / total) if total else 0.0,
             "tiempo_total": tiempo_total,
             "tiempo_total_fmt": formatear_tiempo(tiempo_total),
+            "tiempo_busqueda": tiempo_busqueda_acum,
+            "tiempo_busqueda_fmt": formatear_tiempo(tiempo_busqueda_acum),
+            "tiempo_arranque": tiempo_warmup_acum,
+            "tiempo_arranque_fmt": formatear_tiempo(tiempo_warmup_acum),
+            "tiempo_promedio": (tiempo_busqueda_acum / exitosas) if exitosas else 0.0,
+            "tiempo_promedio_fmt": formatear_tiempo((tiempo_busqueda_acum / exitosas) if exitosas else 0.0),
+            "phi_promedio": (sum(n_phi) / len(n_phi)) if n_phi else 0.0,
+            "phi_total": sum(n_phi),
+            "phi_relativo_promedio": (sum(n_rel) / len(n_rel)) if n_rel else 0.0,
+            "bandas": bandas,
             "salida": str(ruta_salida),
         })
 
@@ -249,7 +311,7 @@ def calc_metrics(req: MetricReq):
     )
 
 
-# ── Comparativa QNodes vs GeoMIP (resultados manuales) ─────────────────────
+# ── Comparativa KQNodes vs KGeoMIP (resultados manuales) ─────────────────────
 
 @app.get("/api/comparativa")
 def comparativa():

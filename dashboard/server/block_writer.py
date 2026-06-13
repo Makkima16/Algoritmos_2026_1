@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Escritura de resultados de bloque a XLSX, replicando el formato de los exec.py
-(QNodes/exec.py: COLUMNAS_BLOQUE) para que los archivos generados desde la GUI
+(KQNodes/exec.py: COLUMNAS_BLOQUE) para que los archivos generados desde la GUI
 sean indistinguibles de los de terminal.
 """
 
@@ -38,10 +38,18 @@ def formatear_tiempo(segundos: float) -> str:
     return f"{h} h {int(resto // 60)} min {resto % 60:.2f} s"
 
 
-def escribir_xlsx_bloque(ruta_salida: Path, filas: list[dict], tiempo_total: float) -> None:
+def escribir_xlsx_bloque(
+    ruta_salida: Path,
+    filas: list[dict],
+    tiempo_total: float,
+    tiempo_arranque: float = 0.0,
+) -> None:
     """
     filas: lista en orden original con claves
         {num, alcance, mecanismo, particion, perdida, tiempo_fmt, error}
+    tiempo_total: wall-clock del lote completo.
+    tiempo_arranque: acumulado de preparación del subsistema (warmup), aparte del
+        tiempo de búsqueda; se reporta en su propia fila como en exec.py.
     """
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -94,6 +102,19 @@ def escribir_xlsx_bloque(ruta_salida: Path, filas: list[dict], tiempo_total: flo
     tc = ws.cell(row=fila_total, column=6, value=formatear_tiempo(tiempo_total))
     tc.font = Font(bold=True)
     ws.row_dimensions[fila_total].height = 22
+
+    # Fila de "arranque del motor" (warmup): preparación del subsistema acumulada,
+    # aparte del tiempo de las pruebas. Mismo formato que KQNodes/exec.py.
+    fila_warm = fila_total + 1
+    warm_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    for col in range(1, 7):
+        cc = ws.cell(row=fila_warm, column=col)
+        cc.fill = warm_fill
+        cc.alignment = center
+    ws.cell(row=fila_warm, column=1, value="Arranque motor (warmup)").font = Font(bold=True)
+    wc = ws.cell(row=fila_warm, column=6, value=formatear_tiempo(tiempo_arranque))
+    wc.font = Font(bold=True)
+    ws.row_dimensions[fila_warm].height = 22
 
     ruta_salida.parent.mkdir(parents=True, exist_ok=True)
     wb.save(ruta_salida)

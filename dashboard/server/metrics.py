@@ -6,13 +6,13 @@ Entradas (de Solution / JSON de resultados):
   S = distribucion_subsistema  (sistema original)
   P = distribucion_particion   (sistema tras la partición)
   phi = perdida_phi
-  particion = string con la notación de grupos (QNodes o GeoMIP)
+  particion = string con la notación de grupos (KQNodes o KGeoMIP)
 
 Las 4 familias de métricas responden:
   1. ¿Qué tan adecuada es la pérdida Φ frente al sistema original?  (pérdida relativa)
   2. ¿Cuánto crece / se desvía la distribución?                     (crecimiento)
   3. ¿Qué columnas/nodos conservan mejor su información?            (cohesión)
-  4. (Comparativa QNodes vs GeoMIP — se arma en main.py cruzando resultados)
+  4. (Comparativa KQNodes vs KGeoMIP — se arma en main.py cruzando resultados)
 """
 
 import re
@@ -46,8 +46,8 @@ def parse_grupos(particion: str) -> list[list[str]]:
     """
     Extrae los grupos de la primera línea (futuros/efecto, en MAYÚSCULAS) de la
     notación de partición. Soporta ambos formatos:
-      QNodes : "⎛ I ⎞⎛ A,B,C ⎞\n⎝ i ⎠⎝ a,b,c ⎠"
-      GeoMIP : "| E || A,B,C |\n| e || a,b,c |"
+      KQNodes : "⎛ I ⎞⎛ A,B,C ⎞\n⎝ i ⎠⎝ a,b,c ⎠"
+      KGeoMIP : "| E || A,B,C |\n| e || a,b,c |"
     """
     if not particion:
         return []
