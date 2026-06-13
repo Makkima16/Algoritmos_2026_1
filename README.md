@@ -18,7 +18,8 @@ Contiene dos frameworks independientes para resolver el problema de la **k-Parti
 6. [Instalación paso a paso](#instalación-paso-a-paso)
 7. [Uso — GeoMIP](#uso--geomip)
 8. [Uso — QNodes](#uso--qnodes)
-9. [Convenciones de desarrollo](#convenciones-de-desarrollo)
+9. [Dashboard (GUI)](#dashboard-gui)
+10. [Convenciones de desarrollo](#convenciones-de-desarrollo)
 
 ---
 
@@ -342,6 +343,32 @@ El flujo es análogo al de GeoMIP:
 # En QNodes/exec.py, antes de ejecutar:
 aplicacion.activar_profiling()
 ```
+
+---
+
+## Dashboard (GUI)
+
+Interfaz gráfica (React + Vite + FastAPI) en `dashboard/` para operar y analizar ambos
+frameworks desde el navegador. Mantiene un worker persistente por motor (aislamiento del
+paquete `src`) y permite ejecutar por bloque (streaming SSE), explorar resultados guardados
+y comparar QNodes vs GeoMIP con métricas. Detalles y endpoints en
+[`dashboard/README.md`](dashboard/README.md).
+
+```bash
+# Backend (desde la raíz, con el .venv activo):
+.venv/Scripts/python.exe -m uvicorn main:app --app-dir dashboard/server --port 8000
+# Frontend (desde dashboard/):
+npm install && npm run dev      # http://localhost:5173
+```
+
+Dos detalles del **modo análisis** que conviene conocer:
+
+- **Arranque del motor (warmup):** antes de cada lote se ejecuta una corrida de
+  calentamiento descartable (con los parámetros de la primera prueba válida) para pagar
+  los costos de una sola vez del motor. Así la **primera prueba ya no incluye el arranque**
+  en su tiempo guardado; el arranque se reporta aparte (fila *Arranque motor (warmup)*).
+- **Ganador "Ambos":** en la comparación por bloque, si ambos motores arrojan la misma
+  pérdida Φ, la columna *Mejor* muestra **"Ambos"** en lugar de adjudicar el empate a uno.
 
 ---
 

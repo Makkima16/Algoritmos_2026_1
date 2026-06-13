@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Gestor de los dos procesos worker persistentes (QNodes y GeoMIP).
+Gestor de los dos procesos worker persistentes (KQNodes y KGeoMIP).
 
 Cada worker es un subprocess de `worker_runner.py` lanzado con el `cwd` de su
 algoritmo. El pool los mantiene vivos (precargados) desde el arranque del backend
@@ -23,8 +23,8 @@ REPO_ROOT = SERVER_DIR.parents[1]  # dashboard/server -> dashboard -> repo
 WORKER_SCRIPT = SERVER_DIR / "worker_runner.py"
 
 ALGO_ROOTS = {
-    "qnodes": REPO_ROOT / "QNodes",
-    "geomip": REPO_ROOT / "GeoMIP",
+    "qnodes": REPO_ROOT / "KQNodes",
+    "geomip": REPO_ROOT / "KGeoMIP",
 }
 
 

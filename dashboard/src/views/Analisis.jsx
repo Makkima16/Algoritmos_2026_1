@@ -4,14 +4,14 @@ import { fmt, formatearTiempo } from "../lib/metrics.js";
 import ComparacionPanel from "../components/ComparacionPanel.jsx";
 
 const ALGOS = ["qnodes", "geomip"];
-const NOMBRE = { qnodes: "QNodes", geomip: "GeoMIP" };
+const NOMBRE = { qnodes: "KQNodes", geomip: "KGeoMIP" };
 
 export default function Analisis() {
   const [modo, setModo] = useState("vivo_manual");
 
   return (
     <div>
-      <h2>Análisis comparativo · QNodes vs GeoMIP</h2>
+      <h2>Análisis comparativo · KQNodes vs KGeoMIP</h2>
       <div className="card">
         <label>Modo de comparación</label>
         <select value={modo} onChange={(e) => setModo(e.target.value)} style={{ maxWidth: 320 }}>
@@ -33,7 +33,7 @@ export default function Analisis() {
   );
 }
 
-// ── Hook: datasets compartidos (data_scripts/) — mismos para ambos algoritmos.
+// ── Hook: datasets compartidos (data/) — mismos para ambos algoritmos.
 // Se identifican por su ruta (única); el mismo archivo puede existir como
 // binaria y no_binaria, por eso no se usa el nombre como clave.
 function useDatasets() {
@@ -81,7 +81,7 @@ function VivoManual() {
     try {
       const comun = { ruta_tpm: ruta, estado, candidato, alcance, mecanismo, k: k === "" ? null : Number(k), permitir_presente_vacio: vacio };
       const [rq, rg] = await Promise.all(ALGOS.map((a) => api.run({ algo: a, ...comun })));
-      setComp({ a: normalizarRun(rq, "QNodes"), b: normalizarRun(rg, "GeoMIP") });
+      setComp({ a: normalizarRun(rq, "KQNodes"), b: normalizarRun(rg, "KGeoMIP") });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -94,7 +94,7 @@ function VivoManual() {
       <div className="card">
         <div className="row">
           <div className="col">
-            <label>Dataset (TPM, data_scripts)</label>
+            <label>Dataset (TPM, data/)</label>
             <select value={ruta} onChange={(e) => setRuta(e.target.value)}>
               <option value="">— seleccionar —</option>
               {datasets.map((d) => <option key={d.ruta} value={d.ruta}>{d.archivo} (N{d.n}, {d.tipo})</option>)}
@@ -191,7 +191,7 @@ function VivoBloque() {
       <div className="card">
         <div className="row">
           <div className="col">
-            <label>Dataset (data_scripts)</label>
+            <label>Dataset (data/)</label>
             <select value={ruta} onChange={(e) => setRuta(e.target.value)}>
               <option value="">— seleccionar —</option>
               {datasets.map((d) => <option key={d.ruta} value={d.ruta}>{d.archivo} (N{d.n}, {d.tipo})</option>)}
@@ -206,7 +206,7 @@ function VivoBloque() {
             </label>
           </div>
         </div>
-        <p className="muted">Se ejecuta el CSV de pruebas N{n || "?"} primero en QNodes y luego en GeoMIP (puede tardar).</p>
+        <p className="muted">Se ejecuta el CSV de pruebas N{n || "?"} primero en KQNodes y luego en KGeoMIP (puede tardar).</p>
         <button className="primary" disabled={corriendo || !ruta || !csv} onClick={comparar}>
           {corriendo ? `Ejecutando… ${progreso}` : "Comparar lote"}
         </button>
@@ -219,20 +219,20 @@ function VivoBloque() {
           <div className="row" style={{ justifyContent: "space-between" }}>
             <h4 style={{ margin: 0 }}>Φ por prueba</h4>
             <span className="muted">
-              Φ media — QNodes: {fmt(resumen.q)} · GeoMIP: {fmt(resumen.g)}
+              Φ media — KQNodes: {fmt(resumen.q)} · KGeoMIP: {fmt(resumen.g)}
             </span>
           </div>
           <div className="scroll">
             <table>
               <thead>
-                <tr><th>#</th><th>Alcance</th><th>Mecanismo</th><th>Φ QNodes</th><th>Φ GeoMIP</th><th>Mejor</th></tr>
+                <tr><th>#</th><th>Alcance</th><th>Mecanismo</th><th>Φ KQNodes</th><th>Φ KGeoMIP</th><th>Mejor</th></tr>
               </thead>
               <tbody>
                 {nums.map((num) => {
                   const q = filasQ[num], g = filasG[num];
                   const pq = q && !q.error ? q.perdida : null;
                   const pg = g && !g.error ? g.perdida : null;
-                  const mejor = pq == null || pg == null ? "—" : pq <= pg ? "QNodes" : "GeoMIP";
+                  const mejor = pq == null || pg == null ? "—" : pq <= pg ? "KQNodes" : "KGeoMIP";
                   return (
                     <tr key={num}>
                       <td>{num}</td>
@@ -240,7 +240,7 @@ function VivoBloque() {
                       <td className="mono">{(q || g)?.mecanismo}</td>
                       <td>{pq == null ? "—" : fmt(pq)}</td>
                       <td>{pg == null ? "—" : fmt(pg)}</td>
-                      <td><span className={`pill ${mejor === "QNodes" ? "qnodes" : mejor === "GeoMIP" ? "geomip" : ""}`}>{mejor}</span></td>
+                      <td><span className={`pill ${mejor === "KQNodes" ? "qnodes" : mejor === "KGeoMIP" ? "geomip" : ""}`}>{mejor}</span></td>
                     </tr>
                   );
                 })}
@@ -308,7 +308,7 @@ function Guardados() {
     try {
       const [dq, dg] = await Promise.all(ALGOS.map((a) => api.resultDetail(sel[a])));
       if (tipo === "manual") {
-        setComp({ a: normalizarDetalle(dq, "QNodes"), b: normalizarDetalle(dg, "GeoMIP") });
+        setComp({ a: normalizarDetalle(dq, "KQNodes"), b: normalizarDetalle(dg, "KGeoMIP") });
       } else {
         setBloque({ q: filasBloque(dq), g: filasBloque(dg) });
       }
@@ -359,8 +359,8 @@ function Guardados() {
       {comp && (
         <>
           <div className="card muted" style={{ fontSize: 13 }}>
-            <div>QNodes: {comp.a.meta}</div>
-            <div>GeoMIP: {comp.b.meta}</div>
+            <div>KQNodes: {comp.a.meta}</div>
+            <div>KGeoMIP: {comp.b.meta}</div>
           </div>
           <ComparacionPanel a={comp.a} b={comp.b} />
         </>
@@ -372,19 +372,19 @@ function Guardados() {
           <div className="row" style={{ justifyContent: "space-between" }}>
             <h4 style={{ margin: 0 }}>Φ por prueba</h4>
             <span className="muted">
-              Φ media — QNodes: {fmt(media(bloque.q))} · GeoMIP: {fmt(media(bloque.g))}
+              Φ media — KQNodes: {fmt(media(bloque.q))} · KGeoMIP: {fmt(media(bloque.g))}
             </span>
           </div>
           <div className="scroll">
             <table>
               <thead>
-                <tr><th>#</th><th>Alcance</th><th>Mecanismo</th><th>Φ QNodes</th><th>Φ GeoMIP</th><th>Mejor</th></tr>
+                <tr><th>#</th><th>Alcance</th><th>Mecanismo</th><th>Φ KQNodes</th><th>Φ KGeoMIP</th><th>Mejor</th></tr>
               </thead>
               <tbody>
                 {nums.map((num) => {
                   const q = bloque.q[num], g = bloque.g[num];
                   const pq = q?.perdida ?? null, pg = g?.perdida ?? null;
-                  const mejor = pq == null || pg == null ? "—" : pq <= pg ? "QNodes" : "GeoMIP";
+                  const mejor = pq == null || pg == null ? "—" : pq === pg ? "Ambos" : pq < pg ? "KQNodes" : "KGeoMIP";
                   return (
                     <tr key={num}>
                       <td>{num}</td>
@@ -392,7 +392,7 @@ function Guardados() {
                       <td className="mono">{(q || g)?.mecanismo}</td>
                       <td>{pq == null ? "—" : fmt(pq)}</td>
                       <td>{pg == null ? "—" : fmt(pg)}</td>
-                      <td><span className={`pill ${mejor === "QNodes" ? "qnodes" : mejor === "GeoMIP" ? "geomip" : ""}`}>{mejor}</span></td>
+                      <td><span className={`pill ${mejor === "KQNodes" ? "qnodes" : mejor === "KGeoMIP" ? "geomip" : ""}`}>{mejor}</span></td>
                     </tr>
                   );
                 })}

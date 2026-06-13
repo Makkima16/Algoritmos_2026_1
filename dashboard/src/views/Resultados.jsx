@@ -69,8 +69,8 @@ function ResultadoPanel({ titulo, compacto }) {
           <div className="col">
             <label>Algoritmo</label>
             <select value={algo} onChange={(e) => setAlgo(e.target.value)}>
-              <option value="qnodes">QNodes</option>
-              <option value="geomip">GeoMIP</option>
+              <option value="qnodes">KQNodes</option>
+              <option value="geomip">KGeoMIP</option>
             </select>
           </div>
           <div className="col">

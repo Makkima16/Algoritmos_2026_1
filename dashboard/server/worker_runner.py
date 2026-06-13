@@ -2,12 +2,12 @@
 """
 Worker persistente para UN algoritmo (qnodes | geomip).
 
-Materializa el requisito "QNodes y GeoMIP deben estar ya en proceso de ejecución,
+Materializa el requisito "KQNodes y KGeoMIP deben estar ya en proceso de ejecución,
 anclados a modo manual": es un proceso vivo que, por cada línea JSON recibida en
 stdin, ejecuta UNA sola corrida (un `aplicar_estrategia`) y responde con UNA línea
 en stdout.
 
-Aislamiento de `src`: QNodes y GeoMIP tienen ambos un paquete top-level llamado
+Aislamiento de `src`: KQNodes y KGeoMIP tienen ambos un paquete top-level llamado
 `src`. Por eso cada uno corre en su propio intérprete, con `cwd`/`sys.path`
 apuntando a su raíz. Este script recibe (algo, raiz) por argumentos.
 
@@ -60,6 +60,7 @@ def _serializar_solucion(sol) -> dict:
         "distribucion_particion": _lista(sol.distribucion_particion),
         "particion": str(sol.particion),
         "tiempo_total_segundos": float(getattr(sol, "tiempo_ejecucion", 0.0)),
+        "tiempo_preparacion_segundos": float(getattr(sol, "tiempo_preparacion", 0.0)),
     }
 
 

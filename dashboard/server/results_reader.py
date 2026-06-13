@@ -15,13 +15,13 @@ SERVER_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SERVER_DIR.parents[1]
 
 ALGO_ROOTS = {
-    "qnodes": REPO_ROOT / "QNodes",
-    "geomip": REPO_ROOT / "GeoMIP",
+    "qnodes": REPO_ROOT / "KQNodes",
+    "geomip": REPO_ROOT / "KGeoMIP",
 }
 
 # Fuente ÚNICA y compartida de datasets/pruebas para ambos algoritmos
-# (la misma carpeta canónica que usa el suite runner).
-DATA_SCRIPTS = REPO_ROOT / "data_scripts"
+# (la carpeta data/ de la raíz, la misma que usa el suite runner).
+DATA_SCRIPTS = REPO_ROOT / "data"
 
 # Carpeta de resultados "manuales" — difiere por algoritmo.
 MANUAL_DIRNAME = {"qnodes": "manual", "geomip": "manually"}
@@ -67,7 +67,7 @@ def letras_a_binario(etiquetas: str, n_nodos: int) -> str:
 # ── Datasets (TPMs) ────────────────────────────────────────────────────────
 
 def listar_datasets(algo: str | None = None) -> list[dict]:
-    # Datasets compartidos desde data_scripts/ (idénticos para ambos algoritmos).
+    # Datasets compartidos desde data/ (idénticos para ambos algoritmos).
     salida = []
     for tipo, carpeta in (("binaria", "samples_binary"), ("no_binaria", "samples_no_binary")):
         d = DATA_SCRIPTS / carpeta
@@ -87,7 +87,7 @@ def listar_datasets(algo: str | None = None) -> list[dict]:
 # ── CSV de pruebas ─────────────────────────────────────────────────────────
 
 def listar_pruebas(algo: str | None = None, n: int | None = None) -> list[dict]:
-    # CSVs de pruebas compartidos desde data_scripts/Pruebas.
+    # CSVs de pruebas compartidos desde data/Pruebas.
     d = DATA_SCRIPTS / "Pruebas"
     salida = []
     if not d.exists():

@@ -52,7 +52,28 @@ si los workers QNodes/GeoMIP están listos.
 | GET | `/api/datasets?algo=` | TPMs disponibles |
 | GET | `/api/pruebas?algo=&n=` | CSVs de pruebas por N |
 | POST | `/api/run` | Una corrida manual + métricas |
-| POST | `/api/block` | Lote (streaming SSE), guarda XLSX |
+| POST | `/api/block` | Lote (streaming SSE), guarda XLSX. Calienta el motor antes del lote (ver abajo) |
 | GET | `/api/results?algo=&tipo=` | Índice de resultados guardados |
 | GET | `/api/results/detail?ruta=` | Detalle parseado + métricas |
 | GET | `/api/comparativa` | Cruce QNodes vs GeoMIP (resultados manuales) |
+
+## Arranque del motor (warmup) en el lote
+
+La PRIMERA corrida real de un worker paga costos de una sola vez (primer toque de
+numpy, construcción de tablas, carga/caché de la TPM, JIT). Si ese costo cayera
+dentro de la primera prueba, su tiempo guardado quedaría **inflado y engañoso**.
+
+Por eso `/api/block`, antes de iterar el lote, ejecuta una **corrida de calentamiento
+descartable** con los parámetros de la primera prueba válida y la contabiliza aparte
+como **"arranque del motor"** (fila *Arranque motor (warmup)* del XLSX y campo
+`tiempo_arranque` del evento SSE `fin`). Tras el warmup, **todas** las pruebas —incluida
+la primera— miden únicamente su tiempo de búsqueda, y el "Tiempo Total Lote" (wall-clock)
+excluye el arranque. Es el mismo principio que ya aplica el modo bloque de los `exec.py`
+de terminal (calentar cachés antes de la primera prueba).
+
+## Análisis comparativo (KQNodes vs KGeoMIP)
+
+En la vista *Análisis*, la comparación **por bloque** (fila a fila) decide el ganador
+por menor pérdida Φ. Cuando ambos motores arrojan **la misma pérdida**, la columna
+*Mejor* muestra **"Ambos"** (antes el empate se adjudicaba silenciosamente a KQNodes
+por el `<=`).
