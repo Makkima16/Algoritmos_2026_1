@@ -6,7 +6,7 @@ NO modifica el archivo original: genera una COPIA fechada del libro
 DatosPruebas2026_1.xlsx dentro de results_test/ con el nombre
 ``DatosPruebas2026_1_<fecha>.xlsx`` y escribe ahí todos los resultados.
 
-Recorre en secuencia las hojas N del libro (N10 → N15 → N20 → N22). Por cada N:
+Recorre en secuencia las hojas N del libro (N10 → N15 → N20 → N22 → N25). Por cada N:
 corre KGeoMIP con k=3,4,5 y luego KQNodes con k=3,4,5, sobre todas las pruebas
 (Alcance/Mecanismo) que la hoja ya define. Cada lote (N, motor, k) se ejecuta en
 un subproceso aislado (_worker_motor.py) porque KGeoMIP y KQNodes comparten el
@@ -16,10 +16,13 @@ Las TPMs y los datos viven en la carpeta data/ de la RAÍZ del repositorio (la
 misma que usan KGeoMIP y KQNodes); sólo los resultados van a results_test/.
 
 Por cada prueba terminada se escribe Partición / Pérdida / Tiempo (sólo el tiempo
-de BÚSQUEDA, sin el de "calentar motores") en la columna que corresponde y se
-GUARDA la copia de inmediato (persistencia incremental). Además, al terminar cada
-lote (N, motor, k) se escriben, debajo de las pruebas y en la columna de Tiempo de
-ese motor/k, dos celdas:
+de BÚSQUEDA, sin el de "calentar motores") en la columna que corresponde, PERO la
+copia en disco SÓLO se guarda al terminar cada lote (N, motor, k) — guardar por
+prueba ralentizaba mucho el suite, sobre todo en N altos. Si una prueba falla se
+marca ERROR en memoria y se persiste igual al cerrar el lote; si el proceso se
+cae a mitad de un k se pierde lo no guardado de ese k y basta re-ejecutarlo.
+Además, al terminar cada lote (N, motor, k) se escriben, debajo de las pruebas y
+en la columna de Tiempo de ese motor/k, dos celdas:
   • Tiempo total de las pruebas (Σ de los tiempos de búsqueda del lote).
   • Justo debajo, el tiempo de "arranque del motor" (warmup): boot del subproceso
     + preparación del subsistema/tabla — el coste de iniciar motores, aparte del
@@ -37,7 +40,7 @@ Uso:
     .venv/Scripts/python.exe data/run_suite_2026.py [opciones]
 
 Opciones:
-    --solo-n 10,15        Limita a estos N (por defecto 10,15,20,22).
+    --solo-n 10,15        Limita a estos N (por defecto 10,15,20,22,25).
     --solo-k 3,4          Limita a estos k (por defecto 3,4,5).
     --solo-motor qnodes   Limita a un motor (geomip | qnodes; por defecto ambos).
     --vacio / --no-vacio  Permite (o no) mecanismo ∅ en las partes. Por defecto SÍ
@@ -45,6 +48,7 @@ Opciones:
                           real; con --no-vacio las pérdidas de KGeoMIP se inflan.
     --rehacer             Recalcula también celdas que ya tienen resultado.
                           (Por defecto se SALTAN las celdas ya rellenadas.)
+    --no-interactivo      Usa los CSV predeterminados de PLAN_N sin preguntar.
 """
 
 import os
@@ -75,6 +79,8 @@ SAMPLES_DIR = DATA_ROOT / "samples_binary"
 GEOMIP_ROOT = REPO_ROOT / "KGeoMIP"
 QNODES_ROOT = REPO_ROOT / "KQNodes"
 
+SAMPLES_DIRS = [SAMPLES_DIR, DATA_ROOT / "samples_no_binary"]
+
 RESULT_SENTINEL = "@@RESULT@@"
 
 # Mapa N → (hoja, archivo TPM dentro de data/samples_binary).
@@ -84,6 +90,7 @@ PLAN_N = {
     15: ("15B-Elementos", "N15A.csv"),
     20: ("20A-Elementos", "N20A.csv"),
     22: ("22A-Elementos", "N22A.csv"),
+    25: ("25A-Elementos ", "N25A.csv"),  # OJO: el nombre de la hoja lleva un espacio final.
 }
 
 # k → motor → (col_particion, col_perdida, col_tiempo)
@@ -196,14 +203,95 @@ def escribir_etiquetas_resumen(ws, fila_tests, fila_warm):
     ew.alignment = _CENTER
 
 
+# ── Selección interactiva de CSV por N ─────────────────────────────────────
+
+def buscar_csvs_disponibles(n: int) -> list:
+    """Devuelve los Path de los CSV para N{n} encontrados en las carpetas de samples."""
+    resultado = []
+    for d in SAMPLES_DIRS:
+        if d.exists():
+            resultado.extend(sorted(d.glob(f"N{n}*.csv")))
+    return resultado
+
+
+def seleccionar_csvs_interactivo(ns: list) -> dict:
+    """
+    Para cada N pedido pregunta qué CSV usar o si se omite.
+    Retorna {n: (hoja, tpm_path: Path)} sólo para los N que el usuario no omite.
+    """
+    print("\n" + "=" * 64)
+    print("  Selección de TPM (CSV) para cada N")
+    print("  Enter sin valor = usar el predeterminado  |  0 = omitir N")
+    print("=" * 64)
+
+    plan = {}
+    for n in ns:
+        if n not in PLAN_N:
+            print(f"\nN{n}: sin hoja definida en PLAN_N — se omitirá.")
+            continue
+        hoja, default_name = PLAN_N[n]
+        disponibles = buscar_csvs_disponibles(n)
+
+        print(f"\nN{n}  (hoja: '{hoja}')")
+        if not disponibles:
+            print("  No se encontraron CSV para este N en las carpetas de samples.")
+            resp = input("  Ruta manual al CSV (o Enter para omitir): ").strip()
+            if resp:
+                p = Path(resp)
+                if p.exists():
+                    plan[n] = (hoja, p)
+                    print(f"  → Usando: {p.name}")
+                else:
+                    print(f"  Archivo no encontrado — se omite N{n}.")
+            else:
+                print(f"  Se omite N{n}.")
+            continue
+
+        for i, f in enumerate(disponibles, 1):
+            marca = "  ◄ predeterminado" if f.name == default_name else ""
+            print(f"    [{i}] {f.name}  ({f.parent.name}){marca}")
+        print(f"    [0] Omitir N{n}")
+
+        while True:
+            resp = input(f"  Selección [1-{len(disponibles)} / 0 / Enter=predeterminado]: ").strip()
+            if resp == "0":
+                print(f"  N{n} omitido.")
+                break
+            if resp == "":
+                default_path = SAMPLES_DIR / default_name
+                if default_path.exists():
+                    plan[n] = (hoja, default_path)
+                    print(f"  → Usando predeterminado: {default_name}")
+                    break
+                # predeterminado no existe → buscar en otras carpetas
+                alt = next((f for f in disponibles if f.name == default_name), None)
+                if alt:
+                    plan[n] = (hoja, alt)
+                    print(f"  → Usando predeterminado: {alt}")
+                    break
+                print(f"  El predeterminado '{default_name}' no existe. Elige una opción o 0 para omitir.")
+                continue
+            try:
+                idx = int(resp)
+                if 1 <= idx <= len(disponibles):
+                    elegido = disponibles[idx - 1]
+                    plan[n] = (hoja, elegido)
+                    print(f"  → Usando: {elegido.name}")
+                    break
+                print(f"  Ingresa un número entre 0 y {len(disponibles)}.")
+            except ValueError:
+                print(f"  Ingresa un número entre 0 y {len(disponibles)}.")
+
+    return plan
+
+
 # ── Ejecución de un lote (N, motor, k) ─────────────────────────────────────
 
-def correr_lote(wb, ws, dest_path, n, tpm_name, engine, k, estado, candidato_bits,
+def correr_lote(wb, ws, dest_path, n, tpm_path, engine, k, estado, candidato_bits,
                 pruebas, rehacer, permitir_vacio, fila_tests, fila_warm) -> None:
     cols = COLS[k][engine]
     col_tiempo = cols[2]
     root = ENGINE_ROOTS[engine]
-    tpm_path = SAMPLES_DIR / tpm_name
 
     # Filtrar pruebas pendientes (salvo --rehacer).
     pendientes = [p for p in pruebas if rehacer or celda_vacia(ws, p[0], cols[0])]
@@ -259,7 +347,9 @@ def correr_lote(wb, ws, dest_path, n, tpm_name, engine, k, estado, candidato_bit
             if payload.get("ok"):
                 t_tests += float(payload.get("tiempo", 0.0))
                 t_prep += float(payload.get("prep", 0.0))
-            wb.save(dest_path)          # persistencia incremental
+            # NO se guarda por prueba (lento): el lote completo se persiste al
+            # terminar el k (más abajo). Si una prueba falla se marca ERROR en
+            # memoria y se persiste igual al cerrar el lote.
             hechas += 1
             estado_txt = "OK " if payload.get("ok") else "ERR"
             print(f"    fila {fila:>4}  {estado_txt}  ({hechas}/{total})  "
@@ -290,10 +380,12 @@ def main() -> None:
             pass
 
     ap = argparse.ArgumentParser(description="Suite KGeoMIP/KQNodes k=3,4,5 → results_test/DatosPruebas2026_1_<fecha>.xlsx")
-    ap.add_argument("--solo-n", default="10,15,20,22")
+    ap.add_argument("--solo-n", default="10,15,20,22,25")
     ap.add_argument("--solo-k", default="3,4,5")
     ap.add_argument("--solo-motor", default="geomip,qnodes")
     ap.add_argument("--rehacer", action="store_true")
+    ap.add_argument("--no-interactivo", dest="interactivo", action="store_false", default=True,
+                    help="Usa los CSV predeterminados de PLAN_N sin preguntar.")
     ap.add_argument("--vacio", dest="vacio", action="store_true", default=True,
                     help="Permite mecanismo ∅ (por defecto). Da la pérdida mínima real.")
     ap.add_argument("--no-vacio", dest="vacio", action="store_false",
@@ -308,6 +400,18 @@ def main() -> None:
     if not XLSX_SOURCE.exists():
         sys.exit(f"No se encontró {XLSX_SOURCE}")
 
+    # ── Selección interactiva de CSV (o predeterminados) ──────────────────────
+    if args.interactivo:
+        plan_elegido = seleccionar_csvs_interactivo(ns)
+    else:
+        plan_elegido = {
+            n: (PLAN_N[n][0], SAMPLES_DIR / PLAN_N[n][1])
+            for n in ns if n in PLAN_N
+        }
+
+    if not plan_elegido:
+        sys.exit("No se seleccionó ningún N — nada que ejecutar.")
+
     # ── Copia fechada en results_test/ — el original NO se toca ──────────────
     RESULTS_TEST_DIR.mkdir(parents=True, exist_ok=True)
     fecha = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -317,18 +421,15 @@ def main() -> None:
     wb = openpyxl.load_workbook(dest_path)
     t_inicio = time.time()
 
-    print("=" * 64)
-    print(f"  Suite 2026-1   N={ns}   k={ks}   motores={[ENGINE_NOMBRE[m] for m in motores]}")
+    ns_elegidos = list(plan_elegido.keys())
+    print("\n" + "=" * 64)
+    print(f"  Suite 2026-1   N={ns_elegidos}   k={ks}   motores={[ENGINE_NOMBRE[m] for m in motores]}")
     print(f"  permitir_presente_vacio = {args.vacio}")
     print(f"  Fuente : {XLSX_SOURCE.name}")
     print(f"  Salida : {dest_path}")
     print("=" * 64)
 
-    for n in ns:
-        if n not in PLAN_N:
-            print(f"\nN{n}: sin plan definido — se omite.")
-            continue
-        hoja, tpm_name = PLAN_N[n]
+    for n, (hoja, tpm_path) in plan_elegido.items():
         if hoja not in wb.sheetnames:
             print(f"\nN{n}: hoja '{hoja}' no existe en el libro — se omite.")
             continue
@@ -345,14 +446,22 @@ def main() -> None:
         fila_warm = ultima_fila + 3
         escribir_etiquetas_resumen(ws, fila_tests, fila_warm)
 
-        print(f"\n{'─' * 64}\nN{n}  (hoja '{hoja}', TPM {tpm_name})")
+        print(f"\n{'─' * 64}\nN{n}  (hoja '{hoja}', TPM {tpm_path.name})")
         print(f"  Estado={estado}  Candidato={candidato_bits}  Pruebas={len(pruebas)}")
 
         for engine in motores:           # KGeoMIP primero, luego KQNodes
             for k in ks:                  # k = 3, 4, 5
-                correr_lote(wb, ws, dest_path, n, tpm_name, engine, k,
+                correr_lote(wb, ws, dest_path, n, tpm_path, engine, k,
                             estado, candidato_bits, pruebas, args.rehacer,
                             args.vacio, fila_tests, fila_warm)
+
+    # ── Gráficas comparativas (QNodes vs Geométrica) ──────────────────────────
+    try:
+        from graficos_suite import generar_graficos
+        print("\nGenerando gráficas comparativas...")
+        generar_graficos(wb, PLAN_N, COLS)
+    except Exception as exc:  # noqa: BLE001 — las gráficas no deben tumbar el suite
+        print(f"  [gráficos] no se pudieron generar: {type(exc).__name__}: {exc}")
 
     wb.save(dest_path)
     print(f"\n{'=' * 64}")

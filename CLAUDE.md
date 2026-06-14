@@ -56,11 +56,21 @@ AYDA_2026_1/
 
 ### KGeoMIP Pipelíne (`exec_kgeomip.py`)
 ```
-exec_kgeomip.py
-  └── KGeoMIP.aplicar_estrategia(condicion, alcance, mecanismo, tpm)
-        ├── 1. Extraer y construir subsistema candidato.
-        ├── 2. BFS sobre hipercubo (o matriz EMD optimizada para N>20).
-        └── 3. Distribuir heurísticas por k concurrentes (ProcessPoolExecutor).
+exec_kgeomip.py (modo bloque)
+  ├── warmup_motor()                  ← Numba JIT (carga binario @njit o compila)
+  │                                      + pool de hilos joblib; arrays mínimos 2 nodos.
+  └── KGeoMIP.aplicar_estrategia(condicion, alcance, mecanismo, tpm, k)
+        ├── 1. sia_preparar_subsistema  → condicionar TPM al estado inicial.
+        ├── 2. _construir_tabla_costos  → tabla (2^n_dims × N) por recurrencia de
+        │                                 capas de Hamming; kernel @njit si Numba
+        │                                 disponible, numpy vectorizado si no.
+        ├── 3. _construir_cut_pool      → O(N) cortes asimétricos + Hamming.
+        └── Para cada k ∈ {2..min(5,N)} (secuencial, joblib threads interno):
+              ├── _greedy_k_particion   → top-down: k-1 divisiones del pool.
+              └── _refinar_bloques_1move → best-improvement futuro + presente [fase final].
+              # VNS (_refinar_bloques_2move) e ILS ligero (_perturbacion_bloques) existen
+              # como código pero están DESACTIVADOS (N_VNS_MAX = 0, N_ILS_LIGHT = 0):
+              # ninguno mejora Φ y cuestan 3–5×. Ver KGeoMIP/docs/decision_sin_ils.md.
 ```
 
 ### KQNodes Pipelíne (`exec.py`)

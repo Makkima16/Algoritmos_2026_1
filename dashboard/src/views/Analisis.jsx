@@ -279,7 +279,7 @@ function Guardados() {
       tiempo: d.tiempo_total_segundos,
       particion: d.particion,
       metricas: det.metricas,
-      meta: `${d.dataset} · alc ${d.alcance} · mec ${d.mecanismo} · k ${d.k_solicitado ?? "?"}`,
+      meta: `${d.dataset} · estado ${d.estado_inicial ?? "?"} · cand ${d.sistema_candidato ?? "?"} · alc ${d.alcance} · mec ${d.mecanismo} · k ${d.k_solicitado ?? "?"}`,
     };
   }
 
@@ -310,7 +310,10 @@ function Guardados() {
       if (tipo === "manual") {
         setComp({ a: normalizarDetalle(dq, "KQNodes"), b: normalizarDetalle(dg, "KGeoMIP") });
       } else {
-        setBloque({ q: filasBloque(dq), g: filasBloque(dg) });
+        setBloque({
+          q: filasBloque(dq), g: filasBloque(dg),
+          metaQ: dq.data.meta || {}, metaG: dg.data.meta || {},
+        });
       }
     } catch (e) {
       setError(String(e));
@@ -375,6 +378,13 @@ function Guardados() {
               Φ media — KQNodes: {fmt(media(bloque.q))} · KGeoMIP: {fmt(media(bloque.g))}
             </span>
           </div>
+          {(bloque.metaQ?.estado || bloque.metaQ?.candidato || bloque.metaG?.estado) && (
+            <div className="muted mono" style={{ fontSize: 12, marginBottom: 6 }}>
+              KQNodes: estado {bloque.metaQ?.estado || "—"} · cand {bloque.metaQ?.candidato || "—"}
+              {" │ "}
+              KGeoMIP: estado {bloque.metaG?.estado || "—"} · cand {bloque.metaG?.candidato || "—"}
+            </div>
+          )}
           <div className="scroll">
             <table>
               <thead>

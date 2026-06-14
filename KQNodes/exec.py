@@ -346,11 +346,18 @@ _ALT_FILL  = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="so
 _TOT_FILL  = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
 
 
-def _crear_excel_bloque_inicial(ruta_salida: Path, pruebas_preparadas: list, n_pruebas: int) -> None:
+def _crear_excel_bloque_inicial(
+    ruta_salida: Path,
+    pruebas_preparadas: list,
+    n_pruebas: int,
+    estado: str = "",
+    candidato: str = "",
+) -> None:
     """
     Crea el Excel con todas las filas pre-rellenadas (solo #Prueba, Alcance, Mecanismo)
     y una fila final de Tiempo Total en pending. Los resultados se rellenan prueba a prueba.
     pruebas_preparadas debe estar en orden original del CSV (sorted by _orig_idx).
+    estado/candidato: se guardan en celdas aparte (filas de metadatos al final del lote).
     """
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -417,6 +424,24 @@ def _crear_excel_bloque_inicial(ruta_salida: Path, pruebas_preparadas: list, n_p
     ws.cell(row=fila_warm, column=6).fill = warm_fill
     ws.cell(row=fila_warm, column=6).alignment = center_align
     ws.row_dimensions[fila_warm].height = 22
+
+    # Metadatos del lote en celdas aparte: estado inicial y candidato (col 1 =
+    # etiqueta, col 2 = valor). Su #Prueba no es numérico → el dashboard las omite
+    # de la tabla y las muestra como cabecera.
+    meta_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    for offset, (etiqueta, valor) in enumerate(
+        (("Estado inicial", estado), ("Candidato", candidato)), start=1
+    ):
+        fila_meta = fila_warm + offset
+        for col in range(1, 7):
+            c = ws.cell(row=fila_meta, column=col)
+            c.fill = meta_fill
+            c.alignment = center_align
+        ws.cell(row=fila_meta, column=1, value=etiqueta).font = bold_font
+        vc = ws.cell(row=fila_meta, column=2, value=valor or "")
+        vc.font = Font(name="Consolas")
+        vc.alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[fila_meta].height = 20
 
     wb.save(ruta_salida)
 
@@ -655,7 +680,8 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
         ],
         key=lambda r: r["_orig_idx"],
     )
-    _crear_excel_bloque_inicial(ruta_salida, pruebas_para_excel, len(pruebas))
+    _crear_excel_bloque_inicial(ruta_salida, pruebas_para_excel, len(pruebas),
+                                estado=estado, candidato=bits_candidato)
     fila_total = len(pruebas) + 2
     fila_warm  = fila_total + 1
 

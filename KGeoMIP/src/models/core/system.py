@@ -38,9 +38,19 @@ class System:
         if estado_inicio.size != n_nodes:
             raise ValueError(f"Estado inicial debe tener longitud {n_nodes}")
         self.estado_inicial = estado_inicio
-        
-        def _obtener_columna(idx):
-            return tpm.marginal_nodo(idx) if is_lazy_tpm else tpm[:, idx]
+
+        # Para una LazyTPM se leen TODAS las columnas en una sola pasada del CSV.
+        # Llamar marginal_nodo(idx) por nodo reparsea el archivo completo N veces
+        # (N relecturas de 2^N filas), lo que dominaba el tiempo de preparación
+        # en N grande (p.ej. ~15 min de E/S para N=22). columnas() lo hace 1 vez.
+        if is_lazy_tpm:
+            _columnas_lazy = tpm.columnas()
+
+            def _obtener_columna(idx):
+                return _columnas_lazy[idx]
+        else:
+            def _obtener_columna(idx):
+                return tpm[:, idx]
 
         self.ncubos = tuple(
             NCube(
@@ -306,7 +316,12 @@ class System:
             NDArray[np.float32]: Este arreglo contiene cada elemento/variable de forma ordenada y consecutiva seleccionado específicamente en la clave formada por el estado inicial.
         """
         probabilidad: float
-        distribuciones = np.empty(self.indices_ncubos.size, dtype=np.float32)
+        # float64 (no float32): el vector de marginales es de tamaño N (no la tabla
+        # de costos tabla_T), así que no impacta memoria, y permite que KGeoMIP,
+        # QNodes y la fuerza bruta coincidan a ~1e-15. En float32 cada implementación
+        # redondea la media con distinto orden de reducción → diferencias de ~1e-8
+        # (incluso KGeoMIP por DEBAJO de la fuerza bruta, lo que parecía un error).
+        distribuciones = np.empty(self.indices_ncubos.size, dtype=np.float64)
 
         for i, ncubo in enumerate(self.ncubos):
             probabilidad = ncubo.data

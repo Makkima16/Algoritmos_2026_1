@@ -1,15 +1,34 @@
 """
-KGeoMIP — Extensión de la estrategia geométrica GeoMIP a k-particiones.
+KGeoMIP — Extensión de GeoMIP a k-particiones mediante greedy top-down asimétrico.
 
-PARALELIZACIÓN: Evaluación secuencial de k con máximo de núcleos por k.
+Algoritmo (pipeline por cada k ∈ {2, 3, ..., min(5, N)} evaluado secuencialmente):
+  1. _construir_tabla_costos  → tabla (2^n_dims × N) por recurrencia de capas de Hamming.
+     Con Numba (@njit cache=True): un kernel C puro en una sola pasada; el binario se
+     carga de disco en el primer arranque del proceso (~0.1–0.5 s) o se compila si no
+     existe aún (~1–3 s). Sin Numba: vectorización numpy por shells, chunkeada para
+     uso eficiente de caché CPU. Complejidad: O(n_dims × 2^n_dims).
+  2. _construir_cut_pool      → O(N) cortes asimétricos (aislamiento simétrico,
+     complemento y mecanismo vacío por nodo) + mejor representante por nivel Hamming.
+  3. _greedy_k_particion      → greedy top-down: inicia con un bloque único (todos
+     los futuros, todos los presentes) y aplica k-1 divisiones óptimas del pool.
+  4. _refinar_bloques_1move   → best-improvement: movimientos futuro y presente asimétrico
+     (FASE FINAL ACTIVA del motor en producción).
 
-El bucle de k evalúa cada valor secuencialmente (k=2, luego k=3, ...).
-Cada k usa cpu_count-1 núcleos para la búsqueda interna con joblib.
-Esto evita dividir recursos entre k's y maximiza el rendimiento por tarea.
+  Mejoras DESACTIVADAS (existen como código pero con bucle = 0; no aportan Φ y cuestan
+  3–5×, ver docs/decision_sin_ils.md):
+    · _refinar_bloques_2move  → VNS: pares de movimientos simultáneos (N_VNS_MAX = 0).
+    · _perturbacion_bloques   → ILS ligero: perturbación + re-refinar (N_ILS_LIGHT = 0).
 
-NOTA sobre joblib:
-  - Los métodos internos (_agrupamiento_jerarquico,
-    _refinar_particion_local) usan joblib con n_jobs = N_JOBS_INTERNOS.
+PARALELIZACIÓN:
+  Los k se evalúan de forma SECUENCIAL; dentro de cada k se usan N_JOBS_INTERNOS = cpu_count-1
+  hilos (joblib prefer="threads") en _mejor_split_bloques, _refinar_bloques_1move y
+  _refinar_bloques_2move para evaluar candidatos y vecinos en paralelo.
+
+ARRANQUE (primera ejecución del proceso):
+  warmup_motor() debe llamarse ANTES del lote para absorber el coste de inicio sin
+  contaminar los tiempos de las pruebas. Dispara el kernel Numba (carga del binario
+  cacheado o compilación JIT) y el pool de hilos joblib con arrays mínimos de 2 nodos.
+  Ver exec_kgeomip.py, modo bloque.
 """
 
 import time
@@ -384,7 +403,8 @@ def evaluar_corte_asimetrico(
             if pos.size:
                 dist_rec[pos[0]] = dist_sub[pos[0]]
 
-    return float(np.sum(np.abs(dist_original - dist_rec)))
+    # Acumular en float64 (como BruteForceKMIP/QNodes) para Φ consistente.
+    return float(np.sum(np.abs(dist_original - dist_rec), dtype=np.float64))
 
 
 def _serializar_particion(
@@ -1057,10 +1077,14 @@ def evaluar_bloques(
         if future_set
     ]
     if not particiones:
-        return float(np.sum(np.abs(dist_original)))
+        return float(np.sum(np.abs(dist_original), dtype=np.float64))
 
     dist_rec = subsistema.particionar(particiones).distribucion_marginal()
-    return float(np.sum(np.abs(dist_original - dist_rec)))
+    # Acumular la L1 en float64 (como BruteForceKMIP/QNodes). dist_original y
+    # dist_rec son float32; sin dtype=float64 np.sum acumularía en float32 y el Φ
+    # podría caer ~1e-8 POR DEBAJO del de la fuerza bruta (misma partición, suma
+    # menos precisa) — lo que haría parecer que KGeoMIP "mejora" al óptimo exacto.
+    return float(np.sum(np.abs(dist_original - dist_rec), dtype=np.float64))
 
 
 def _mejor_split_bloques(
@@ -1249,6 +1273,150 @@ def _refinar_bloques_1move(
     return mejor_perdida, mejor_bloques
 
 
+def _refinar_bloques_2move(
+    subsistema,
+    dist_original: np.ndarray,
+    bloques: "list[Block]",
+    mejor_perdida: float,
+    n_jobs: int = 1,
+    permitir_presente_vacio: bool = True,
+) -> "tuple[float, list[Block], bool]":
+    """
+    2-move sistemático post-convergencia 1-move (VNS).
+
+    Genera todos los movimientos 1-move válidos sobre los bloques actuales
+    y evalúa cada par de movimientos INDEPENDIENTES aplicados simultáneamente.
+    Si algún par reduce la pérdida, aplica el mejor y devuelve mejoro=True.
+
+    Un par es inválido si:
+      • el segundo movimiento afecta un nodo que el primero ya reubicó
+        (detección implícita: el nodo ya no está en el bloque fuente).
+      • algún bloque queda con el futuro vacío.
+
+    Returns:
+        (perdida, bloques, mejoro) — mejoro=True si se encontró un par que mejora.
+    """
+    k = len(bloques)
+
+    # Generar todos los movimientos 1-move válidos
+    movimientos: list = []
+    for i, (eff_i, pre_i) in enumerate(bloques):
+        if len(eff_i) > 1:
+            for nodo in sorted(eff_i):
+                for j in range(k):
+                    if j != i:
+                        movimientos.append(("f", i, j, nodo))
+        for nodo in sorted(pre_i):
+            if not permitir_presente_vacio and len(pre_i) <= 1:
+                break
+            for j in range(k):
+                if j != i:
+                    movimientos.append(("p", i, j, nodo))
+
+    configs: list = []
+    M = len(movimientos)
+
+    for a in range(M):
+        tipo_a, i_a, j_a, nodo_a = movimientos[a]
+        # Aplicar mov_a desde el estado original
+        bl_a = list(bloques)
+        eff_ia, pre_ia = bl_a[i_a]
+        eff_ja, pre_ja = bl_a[j_a]
+        if tipo_a == "f":
+            if nodo_a not in eff_ia:
+                continue
+            bl_a[i_a] = (eff_ia - {nodo_a}, pre_ia)
+            bl_a[j_a] = (eff_ja | {nodo_a}, pre_ja)
+        else:
+            if nodo_a not in pre_ia:
+                continue
+            bl_a[i_a] = (eff_ia, pre_ia - {nodo_a})
+            bl_a[j_a] = (eff_ja, pre_ja | {nodo_a})
+
+        for b in range(a + 1, M):
+            tipo_b, i_b, j_b, nodo_b = movimientos[b]
+            bl_b = list(bl_a)
+            eff_ib, pre_ib = bl_b[i_b]
+            eff_jb, pre_jb = bl_b[j_b]
+            if tipo_b == "f":
+                if nodo_b not in eff_ib or len(eff_ib) <= 1:
+                    continue
+                bl_b[i_b] = (eff_ib - {nodo_b}, pre_ib)
+                bl_b[j_b] = (eff_jb | {nodo_b}, pre_jb)
+            else:
+                if nodo_b not in pre_ib:
+                    continue
+                if not permitir_presente_vacio and len(pre_ib) <= 1:
+                    continue
+                bl_b[i_b] = (eff_ib, pre_ib - {nodo_b})
+                bl_b[j_b] = (eff_jb, pre_jb | {nodo_b})
+
+            if any(not eff for eff, _ in bl_b):
+                continue
+            configs.append(bl_b)
+
+    if not configs:
+        return mejor_perdida, bloques, False
+
+    if n_jobs > 1 and len(configs) > 1:
+        perdidas = Parallel(n_jobs=min(len(configs), n_jobs), prefer="threads")(
+            delayed(evaluar_bloques)(subsistema, cfg, dist_original)
+            for cfg in configs
+        )
+    else:
+        perdidas = [evaluar_bloques(subsistema, cfg, dist_original) for cfg in configs]
+
+    idx_mejor = int(np.argmin(perdidas))
+    if float(perdidas[idx_mejor]) < mejor_perdida - 1e-9:
+        return float(perdidas[idx_mejor]), configs[idx_mejor], True
+
+    return mejor_perdida, bloques, False
+
+
+def _perturbacion_bloques(
+    bloques: "list[Block]",
+    n_movimientos: int = 2,
+    semilla: int = 42,
+    permitir_presente_vacio: bool = True,
+) -> "list[Block]":
+    """
+    Perturba una k-partición de bloques asimétricos moviendo aleatoriamente
+    nodos futuros y presentes entre bloques.
+
+    Garantiza que ningún bloque quede con el futuro vacío (invariante crítico).
+    Los movimientos futuros y presentes son independientes (asimetría).
+    """
+    rng = _random_module.Random(semilla)
+    fut_listas = [list(eff) for eff, _ in bloques]
+    pre_listas = [list(pre) for _, pre in bloques]
+    k = len(bloques)
+
+    for _ in range(n_movimientos):
+        # Mover un nodo futuro entre bloques
+        candidatos_orig = [i for i, f in enumerate(fut_listas) if len(f) > 1]
+        if candidatos_orig:
+            i = rng.choice(candidatos_orig)
+            nodo = rng.choice(fut_listas[i])
+            j = rng.choice([x for x in range(k) if x != i])
+            fut_listas[i].remove(nodo)
+            fut_listas[j].append(nodo)
+
+        # Mover un nodo presente entre bloques (independiente del futuro)
+        if permitir_presente_vacio:
+            candidatos_pre = [i for i, p in enumerate(pre_listas) if len(p) > 0]
+        else:
+            candidatos_pre = [i for i, p in enumerate(pre_listas) if len(p) > 1]
+        if candidatos_pre:
+            i = rng.choice(candidatos_pre)
+            if pre_listas[i]:
+                nodo = rng.choice(pre_listas[i])
+                j = rng.choice([x for x in range(k) if x != i])
+                pre_listas[i].remove(nodo)
+                pre_listas[j].append(nodo)
+
+    return [(frozenset(f), frozenset(p)) for f, p in zip(fut_listas, pre_listas)]
+
+
 def fmt_bloques(
     bloques: "list[Block]",
     indices_ncubos: np.ndarray,
@@ -1272,6 +1440,162 @@ def fmt_bloques(
     linea_top = "".join(t for t, _ in partes_fmt)
     linea_bot = "".join(b for _, b in partes_fmt)
     return f"{linea_top}\n{linea_bot}"
+
+
+def warmup_motor() -> None:
+    """
+    Precalienta los dos componentes con coste de inicio relevante en GeoMIP:
+
+      1. Kernel Numba _kernel_tabla_costos (si Numba está disponible):
+         La primera llamada carga el binario @njit(cache=True) guardado en disco
+         (~0.1–0.5 s) o lo compila desde cero si no existe aún (~1–3 s). Las
+         llamadas posteriores dentro del mismo proceso no tienen coste adicional.
+         Se dispara aquí con arrays mínimos (n_dims=2, n=2) sin efectos secundarios.
+
+      2. Pool de hilos joblib:
+         El primer Parallel(..., prefer="threads") lanza los N_JOBS_INTERNOS workers.
+         Una corrida trivial aquí evita que la primera prueba del lote pague ese
+         coste de creación de hilos (~50–200 ms según número de núcleos).
+
+    Uso recomendado: llamar una vez antes del bucle de pruebas en modo bloque.
+    En modo manual el coste se absorbe en la única ejecución sin impacto apreciable.
+    """
+    if _NUMBA_DISPONIBLE:
+        _n, _n_dims = 2, 2
+        _total = 1 << _n_dims
+        _prob_T      = np.zeros((_total, _n), dtype=np.float32)
+        _prob_origen = np.zeros(_n, dtype=np.float32)
+        _xor_origen  = np.zeros(_total, dtype=np.uint32)
+        _orden       = np.arange(_total, dtype=np.int32)
+        _tabla_T     = np.zeros((_total, _n), dtype=np.float32)
+        _kernel_tabla_costos(
+            _prob_T, _prob_origen, _xor_origen, _orden, _n_dims, _n, _tabla_T
+        )
+
+    Parallel(n_jobs=N_JOBS_INTERNOS, prefer="threads")(
+        delayed(lambda x: x)(i) for i in range(N_JOBS_INTERNOS * 4)
+    )
+
+
+# ── Solver exacto (fuerza bruta) para N pequeño ─────────────────────────────
+
+# Para N ≤ _KGEOMIP_N_EXACTO se resuelve la k-MIP por enumeración exhaustiva del
+# mismo espacio asimétrico que BruteForceKMIP/QNodes, usando evaluar_bloques: así
+# KGeoMIP devuelve el óptimo global y coincide con la fuerza bruta y con QNodes en
+# CSVs pequeños (deterministas o estocásticos). _CAP acota configuraciones por k.
+_KGEOMIP_N_EXACTO: int = 6
+_KGEOMIP_CAP_EXACTO: int = 300_000
+
+
+def _stirling2(n: int, k: int) -> int:
+    """Número de Stirling de segunda especie S(n, k) (DP iterativo)."""
+    if k < 0 or k > n:
+        return 0
+    if k == 0:
+        return 1 if n == 0 else 0
+    fila = [0] * (k + 1)
+    fila[0] = 1
+    for _ in range(1, n + 1):
+        nueva = [0] * (k + 1)
+        for j in range(1, k + 1):
+            nueva[j] = j * fila[j] + fila[j - 1]
+        fila = nueva
+    return fila[k]
+
+
+def _particiones_en_k(items: list, k: int):
+    """
+    Genera todas las particiones de `items` en EXACTAMENTE `k` bloques no vacíos
+    (S(len(items), k) particiones). Esquema recursivo clásico: cada elemento entra
+    en un bloque existente o abre uno nuevo, exigiendo k bloques al final.
+    """
+    n = len(items)
+    if k < 1 or k > n:
+        return
+
+    def _rec(idx: int, bloques: "list[list]"):
+        if idx == n:
+            if len(bloques) == k:
+                yield [b[:] for b in bloques]
+            return
+        restantes = n - idx
+        elemento = items[idx]
+        if len(bloques) + (restantes - 1) >= k:
+            for i in range(len(bloques)):
+                bloques[i].append(elemento)
+                yield from _rec(idx + 1, bloques)
+                bloques[i].pop()
+        if len(bloques) < k:
+            bloques.append([elemento])
+            yield from _rec(idx + 1, bloques)
+            bloques.pop()
+
+    yield from _rec(0, [])
+
+
+def _resolver_exacto_geomip(
+    subsistema,
+    dist_original: np.ndarray,
+    k: Optional[int],
+    permitir_vacio: bool,
+) -> "Optional[tuple[float, list, int]]":
+    """
+    Enumera exhaustivamente las k-particiones asimétricas válidas y devuelve
+    (Φ mínimo, bloques globales, k) — réplica del espacio de BruteForceKMIP usando
+    el mismo evaluar_bloques de KGeoMIP, así el óptimo es idéntico a la fuerza bruta.
+
+    Cada bloque se construye con índices GLOBALES (valores de indices_ncubos /
+    dims_ncubos), como espera evaluar_bloques. Si el espacio de algún k requerido
+    supera _KGEOMIP_CAP_EXACTO devuelve None (el llamador usa la heurística).
+    """
+    idx = subsistema.indices_ncubos
+    dims = subsistema.dims_ncubos
+    n_vars = len(idx)
+    n_dims = len(dims)
+
+    ks = [k] if k is not None else list(range(2, n_vars + 1))
+    for kk in ks:
+        if _stirling2(n_vars, kk) * (kk ** n_dims) > _KGEOMIP_CAP_EXACTO:
+            return None
+
+    futuros = list(range(n_vars))
+    mejor_por_k: dict[int, tuple[float, list]] = {}
+
+    for kk in ks:
+        mejor_phi = float("inf")
+        mejor_bloques: Optional[list] = None
+        for part_fut in _particiones_en_k(futuros, kk):
+            bloques_fut = [frozenset(int(idx[p]) for p in b) for b in part_fut]
+            if n_dims == 0:
+                bloques = [(bloques_fut[i], frozenset()) for i in range(kk)]
+                phi = evaluar_bloques(subsistema, bloques, dist_original)
+                if phi < mejor_phi:
+                    mejor_phi, mejor_bloques = phi, bloques
+                continue
+            for asignacion in itertools.product(range(kk), repeat=n_dims):
+                pre_sets: list[list[int]] = [[] for _ in range(kk)]
+                for pos_pre, b_idx in enumerate(asignacion):
+                    pre_sets[b_idx].append(int(dims[pos_pre]))
+                if not permitir_vacio and any(len(s) == 0 for s in pre_sets):
+                    continue
+                bloques = [
+                    (bloques_fut[i], frozenset(pre_sets[i])) for i in range(kk)
+                ]
+                phi = evaluar_bloques(subsistema, bloques, dist_original)
+                if phi < mejor_phi:
+                    mejor_phi, mejor_bloques = phi, bloques
+        if mejor_bloques is not None:
+            mejor_por_k[kk] = (mejor_phi, mejor_bloques)
+
+    if not mejor_por_k:
+        return None
+    if k is not None:
+        r = mejor_por_k.get(k)
+        return (r[0], r[1], k) if r is not None else None
+    # k libre: preferir k ≥ 3 si existe (coherente con la rama heurística).
+    candidatos = {kk: v for kk, v in mejor_por_k.items() if kk >= 3} or mejor_por_k
+    mejor_k = min(candidatos, key=lambda kk: candidatos[kk][0])
+    return (candidatos[mejor_k][0], candidatos[mejor_k][1], mejor_k)
 
 
 # ── Clase principal ────────────────────────────────────────────────────────
@@ -1363,6 +1687,49 @@ class KGeoMIP(SIA):
             mejor_perdida = 0.0
             dist_reconstruida = self.sia_dists_marginales.copy()
 
+        elif n_vars <= _KGEOMIP_N_EXACTO and (
+            _exacto := _resolver_exacto_geomip(
+                self.sia_subsistema,
+                self.sia_dists_marginales,
+                k,
+                permitir_presente_vacio,
+            )
+        ) is not None:
+            # Ruta EXACTA: óptimo global por enumeración (coincide con fuerza bruta).
+            mejor_perdida, bloques_optimos, k_optimo = _exacto
+            self.logger.critic(
+                f"Ruta EXACTA (N={n_vars} ≤ {_KGEOMIP_N_EXACTO}): "
+                f"k óptimo={k_optimo}, pérdida={mejor_perdida:.6f}"
+            )
+            self.historico_particiones = [{
+                "k": k_optimo,
+                "perdida": mejor_perdida,
+                "particion_grafica": fmt_bloques(
+                    bloques_optimos,
+                    self.sia_subsistema.indices_ncubos,
+                    self.sia_subsistema.dims_ncubos,
+                ),
+            }]
+            indices = self.sia_subsistema.indices_ncubos
+            dist_reconstruida = np.empty(len(self.sia_dists_marginales), dtype=np.float32)
+            for future_set, present_set in bloques_optimos:
+                if not future_set:
+                    continue
+                futuros = np.array(sorted(future_set), dtype=np.int8)
+                presentes = (
+                    np.array(sorted(present_set), dtype=np.int8)
+                    if present_set
+                    else np.array([], dtype=np.int8)
+                )
+                dist_parte = (
+                    self.sia_subsistema.bipartir(futuros, presentes)
+                    .distribucion_marginal()
+                )
+                for idx in future_set:
+                    pos = np.where(indices == idx)[0]
+                    if pos.size:
+                        dist_reconstruida[int(pos[0])] = dist_parte[int(pos[0])]
+
         else:
             self._construir_tabla_costos()
             cut_pool = _construir_cut_pool(
@@ -1411,10 +1778,57 @@ class KGeoMIP(SIA):
                         f"  +1-move K={test_k} perdida={perdida_k:.6f}"
                     )
 
-                    # Nota: la Búsqueda Local Iterada (ILS) — perturbar el óptimo
-                    # local y re-refinar buscando "hacia los lados" — se retiró por
-                    # aportar mejoras marginales a un costo de tiempo alto.
-                    # Ver KGeoMIP/docs/decision_sin_ils.md.
+                    # ── VNS: ciclos 2-move + 1-move hasta convergencia ────────
+                    # Escapa de mínimos locales 1-move evaluando pares de
+                    # movimientos simultáneos; máx 3 ciclos para acotar el tiempo.
+                    N_VNS_MAX = 0
+                    for _vns_i in range(N_VNS_MAX):
+                        perdida_2m, bloques_2m, mejoro_2m = _refinar_bloques_2move(
+                            self.sia_subsistema,
+                            self.sia_dists_marginales,
+                            bloques_k,
+                            perdida_k,
+                            n_jobs=N_JOBS_INTERNOS,
+                            permitir_presente_vacio=permitir_presente_vacio,
+                        )
+                        if not mejoro_2m:
+                            break
+                        perdida_k, bloques_k = _refinar_bloques_1move(
+                            self.sia_subsistema,
+                            self.sia_dists_marginales,
+                            bloques_2m,
+                            n_jobs=N_JOBS_INTERNOS,
+                            permitir_presente_vacio=permitir_presente_vacio,
+                        )
+                        self.logger.critic(
+                            f"  VNS[{_vns_i}] 2-move+1-move → {perdida_k:.6f}"
+                        )
+
+                    # ── ILS ligero: 2 reinicios con perturbación aleatoria ────
+                    # Escapa de mínimos locales del greedy top-down sin sacrificar
+                    # demasiado tiempo; 2 iteraciones con semillas distintas.
+                    N_ILS_LIGHT = 0
+                    n_perturb = max(1, n_vars // 3)
+                    for _ils_i in range(N_ILS_LIGHT):
+                        bloques_pert = _perturbacion_bloques(
+                            bloques_k,
+                            n_movimientos=n_perturb,
+                            semilla=37 + _ils_i * 19,
+                            permitir_presente_vacio=permitir_presente_vacio,
+                        )
+                        perdida_pert, bloques_pert = _refinar_bloques_1move(
+                            self.sia_subsistema,
+                            self.sia_dists_marginales,
+                            bloques_pert,
+                            n_jobs=N_JOBS_INTERNOS,
+                            permitir_presente_vacio=permitir_presente_vacio,
+                        )
+                        if perdida_pert < perdida_k - 1e-9:
+                            perdida_k = perdida_pert
+                            bloques_k = bloques_pert
+                            self.logger.critic(
+                                f"  ILS[{_ils_i}] mejoró → {perdida_k:.6f}"
+                            )
 
                     fmt_pk = fmt_bloques(
                         bloques_k,

@@ -190,6 +190,34 @@ class LazyTPM:
 
         return resultado
 
+    def columnas(self) -> list[np.ndarray]:
+        """
+        Extrae TODAS las columnas (nodos) en UNA sola pasada del CSV.
+
+        Equivale a [tpm[:, j] for j in range(n_nodos)] pero leyendo el archivo
+        una única vez, no N veces. Llamar marginal_nodo() en bucle reparsea el
+        CSV completo por cada nodo (N relecturas de 2^N filas → O(N · 2^N) de E/S);
+        este método baja esa E/S a una sola pasada, crítico para N grande donde
+        construir el System dominaba el tiempo de preparación.
+
+        Returns
+        -------
+        list[np.ndarray]
+            Lista de n_nodos arreglos contiguos de shape (n_estados,) float32,
+            uno por nodo en orden de columna. Cada uno es directamente
+            reshapeable a (2,)*n_nodos sin copia adicional.
+        """
+        cols = [
+            np.empty(self.n_estados, dtype=np.float32)
+            for _ in range(self.n_nodos)
+        ]
+        for chunk_idx, arr in self.chunks():
+            inicio = chunk_idx * self.chunk_size
+            fin = inicio + arr.shape[0]
+            for j in range(self.n_nodos):
+                cols[j][inicio:fin] = arr[:, j]
+        return cols
+
     # ── Estadísticas rápidas ─────────────────────────────────
 
     def stats_chunk(self, chunk_idx: int) -> dict:

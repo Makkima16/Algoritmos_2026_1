@@ -87,10 +87,12 @@ logs/
 /data/samples_binary/
 /data/samples_no_binary/
 
+
 # ──────────────────────────────────────────────────────────────
 #  Resultados (se generan en cada ejecución)
 # ──────────────────────────────────────────────────────────────
 /KGeoMIP/results/
 /KQNodes/results/
+/Brute_Force/results/
 /results_test/
 DatosPruebas2026_1.xlsx

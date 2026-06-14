@@ -58,14 +58,19 @@ incluso con poda agresiva.
 
 ## 4. Estructura general del algoritmo
 
-El **mismo motor** se usa para todo k, sin distinguir el caso k=2:
+El motor distingue k=2 (exacto con Queyranne) de k≥3 (heurístico greedy+ILS):
 
 ```
 aplicar_estrategia()
   ├── 1. Preparar subsistema (condicionar TPM al estado inicial, marginalizar)
-  ├── 2. _construir_pool_cortes()  → pool de O(N) cortes, construido UNA vez
+  ├── 2. _atomos_asimetricos() → 2N átomos (N futuro + N presente)
+  ├── 3. _queyranne(atomos)    → k=2 EXACTO (Queyranne 1998, O(N²) evaluaciones)
+  │        → phi_q2, bloques_q2
   │
-  ├── [k especificado]
+  ├── [k=2 especificado]
+  │       └── devolver phi_q2, bloques_q2   (óptimo global garantizado)
+  │
+  ├── [k≥3 especificado]
   │       ├── _greedy_bloques(pool, k)   — top-down hasta k bloques
   │       ├── _refinar_bloques(...)      — best-improvement 1-move (futuro + presente)
   │       └── _refinar_con_ils(...)      — perturbación + re-refinamiento (ILS)
@@ -73,12 +78,12 @@ aplicar_estrategia()
   └── [k libre — k=None]
           ├── _greedy_descenso(pool)     — un descenso = un Φ por CADA k (jerarquía nido)
           ├── _refinar_bloques(nivel)    — refinamiento ligero por cada nivel k
-          ├── elegir k ≥ 3 con menor Φ
+          ├── elegir k ≥ 3 con menor Φ (o k=2 si domina)
           └── _refinar_con_ils(ganador)  — ILS final sobre el k ganador
 ```
 
-La memoización de `_cache_bloque` hace que las distribuciones de bloque vistas sean
-O(1) en evaluaciones posteriores, amortizando el costo de las cuatro fases.
+La memoización de `_cache_bloque` (distribuciones) y `NCube.valor_memo` (valores
+escalares) hace que las evaluaciones repetidas sean O(1).
 
 ---
 
@@ -228,12 +233,27 @@ presentes en minúsculas por bloque, ∅ si el mecanismo está vacío):
 
 | Fase | Complejidad | Nota |
 |---|---|---|
-| Pool de cortes | O(N) | Una vez |
-| Mejor split | O(k · |pool|) = O(k · N) evaluaciones | Por paso del descenso |
-| Greedy top-down (k libre) | O(N² · N) = O(N³) evaluaciones | Un descenso, todos los k |
-| Refinamiento 1-move | O(rondas · (Σ|fut| + Σ|pre|) · k) | Futuro + presente |
+| Átomos asimétricos | O(N) | 2N átomos: N futuros + N presentes |
+| **Queyranne (k=2)** | **O(N²) evaluaciones** | **Exacto — óptimo global garantizado** |
+| Pool de cortes (k≥3) | O(N) | Construido una vez |
+| Mejor split | O(k · N) evaluaciones | Por paso del descenso |
+| Greedy top-down (k libre) | O(N³) evaluaciones | Un descenso, todos los k |
+| Refinamiento 1-move | O(rondas · N² · k) | Futuro + presente |
 | ILS | n_ils × (refinamiento) | N-adaptativo |
-| Una evaluación `_emd_bloques` | **O(N)** | Exacta, todo N |
+| Una evaluación `_emd_bloques` | O(N) | Exacta, todo N |
+| Una evaluación `_dist_bloque` | **O(2^(N/2))** | Via `marginal_valor` (antes O(2^N)) |
 
-**Tiempos medidos** (estado='1000…0'): N10A ~0.2–0.5 s por k; N15A ~1 s; N20A k≥3
-~15–20 s, k=None ~60 s. Patrón Φ(k) ≈ (k−1)×~0.5.
+**Tiempos medidos post 2026-06-13** (estado='1000…0', sistema completo):
+
+| Sistema | k | Φ | Tiempo | vs GeoMIP |
+|---------|---|---|--------|-----------|
+| N10A | 2 | 0.474609 | ~0.1 s | = exacto ✓ |
+| N10A | 3–5 | 0.959–1.936 | ~0.1 s | = exacto ✓ |
+| N20A | 2 | 0.499174 | 2.7 s | = exacto ✓ (GeoMIP: 6.2 s) |
+| N20A | 3 | 0.998542 | 2.3 s | = ✓ (GeoMIP: 2.7 s) |
+| N22A | 2 | 0.499575 | 6.5 s | = exacto ✓ (GeoMIP: 31.9 s) |
+| N22A | 3 | 0.999189 | 6.1 s | GeoMIP mejor: 0.999150 |
+| N22A | 4–5 | — | ~5.5–5.8 s | GeoMIP mejor en ambos |
+
+Para k=2, QNodes es siempre exacto y más rápido. Para k≥3 en N≥22, GeoMIP encuentra
+Φ menores (diferencias pequeñas pero consistentes) a costa de mayor tiempo de búsqueda.

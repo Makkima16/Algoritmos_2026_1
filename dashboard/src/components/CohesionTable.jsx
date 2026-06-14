@@ -8,7 +8,7 @@ export default function CohesionTable({ cohesion }) {
 
   return (
     <div className="row">
-      <div className="col">
+      <div className="col" style={{ minWidth: 0 }}>
         <h4>Cohesión por nodo (alta = mejor conservado)</h4>
         <div className="scroll">
           <table>
@@ -34,23 +34,32 @@ export default function CohesionTable({ cohesion }) {
       </div>
 
       {cohesion.grupos?.length > 0 && (
-        <div className="col">
+        <div className="col" style={{ minWidth: 0 }}>
           <h4>Cohesión por grupo de la partición</h4>
-          <table>
-            <thead>
-              <tr><th>Grupo</th><th>Tamaño</th><th>Cohesión media</th><th>Δ total</th></tr>
-            </thead>
-            <tbody>
-              {cohesion.grupos.map((g, i) => (
-                <tr key={i}>
-                  <td className="mono">{g.labels.join(",")}</td>
-                  <td>{g.tamano}</td>
-                  <td>{pct(g.cohesion_media)}</td>
-                  <td>{fmt(g.delta_total)}</td>
+          <div className="scroll">
+            <table style={{ tableLayout: "fixed", width: "100%" }}>
+              <thead>
+                <tr>
+                  <th>Grupo</th>
+                  <th style={{ width: 64 }}>Tamaño</th>
+                  <th style={{ width: 96 }}>Cohesión media</th>
+                  <th style={{ width: 80 }}>Δ total</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {cohesion.grupos.map((g, i) => (
+                  <tr key={i}>
+                    <td className="mono" style={{ wordBreak: "break-word", whiteSpace: "normal" }}>
+                      {g.labels.join(",")}
+                    </td>
+                    <td>{g.tamano}</td>
+                    <td>{pct(g.cohesion_media)}</td>
+                    <td>{fmt(g.delta_total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

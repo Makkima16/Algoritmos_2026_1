@@ -58,9 +58,14 @@ El flujo principal corre en `KGeoMIP.aplicar_estrategia()`:
       · Agglomerative Clustering (variantes: average, complete, single).
       · Candidatos de aislamiento: C(N, k-1) particiones con nodos individuales.
    b. Refinar cada candidato con búsqueda local 1-move hasta convergencia.
-   c. Aplicar Iterated Local Search (ILS): perturbar + refinar × 4.
 3. Retornar la k-partición con menor Φ global.
 ```
+
+> **Nota:** el motor principal actual es **greedy top-down asimétrico + 1-move** (la ruta
+> spectral de arriba quedó como *fallback*). El **ILS** y el **2-move/VNS** se midieron y
+> **no mejoran Φ**, así que están en el código pero **desactivados**
+> (`N_ILS_LIGHT = 0`, `N_VNS_MAX = 0`). Detalle en
+> [`KGeoMIP/docs/decision_sin_ils.md`](KGeoMIP/docs/decision_sin_ils.md).
 
 #### Características principales
 
@@ -145,12 +150,12 @@ Para $N = 25$ con $k$ libre: ~33 M evaluaciones × O(25) cada una → **decenas 
 
 | Criterio | GeoMIP | QNodes |
 |----------|--------|--------|
-| **Estrategia principal** | Heurística geométrica + ILS | Agrupamiento aglomerativo greedy |
+| **Estrategia principal** | Greedy top-down asimétrico + 1-move (geométrico como fallback) | Agrupamiento aglomerativo greedy |
 | **k de entrada** | Requerido (o rango completo en bloque) | Opcional — búsqueda libre sobre todos los k |
 | **Métrica EMD** | Hamming real siempre | Hamming (N ≤ 12) / L1 (N > 12) en `_emd_particion` |
 | **Paralelismo** | ProcessPoolExecutor (un proceso por k) | Single-thread; eficiencia por memoización |
 | **Escalabilidad** | N ≤ 25 con LazyTPM | N ≤ 25 (L1 para N > 12) |
-| **Garantía de optimalidad** | Óptimo local + ILS | Óptimo local greedy + 1-move |
+| **Garantía de optimalidad** | Óptimo local (greedy + 1-move; exacto N ≤ 6) | Óptimo local greedy + 1-move (exacto k=2 vía Queyranne) |
 | **Modo de entrada** | Manual / bloque CSV | Manual / bloque CSV |
 | **Salida** | JSON (manual) / Excel (bloque) | Excel (bloque) |
 | **Mecanismo vacío (∅)** | Soportado | Soportado (`permitir_presente_vacio`) |

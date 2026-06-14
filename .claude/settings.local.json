@@ -43,7 +43,8 @@
       "Bash(ls data/samples_binary/)",
       "Bash(ls data/samples_no_binary/)",
       "Bash(ls data/)",
-      "Bash(../.venv/Scripts/python.exe -c *)"
+      "Bash(../.venv/Scripts/python.exe -c *)",
+      "Bash(python -c \"import openpyxl; wb=openpyxl.load_workbook\\('DatosPruebas2026_1.xlsx', read_only=True\\); print\\(wb.sheetnames\\)\")"
     ]
   }
 }

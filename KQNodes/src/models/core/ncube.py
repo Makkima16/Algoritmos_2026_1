@@ -16,6 +16,7 @@ class NCube:
     dims: NDArray[np.int8]
     data: np.ndarray
     memo: dict[tuple[tuple[int, int], ...], np.ndarray] = field(default_factory=dict)
+    valor_memo: dict[tuple[int, ...], float] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validación de tamaño y dimensionalidad tras inicialización.
@@ -88,6 +89,35 @@ class NCube:
             indice=self.indice,
             dims=nuevas_dims,
         )
+
+    def marginal_valor(
+        self,
+        ejes: NDArray[np.int8],
+        estado_inicial: NDArray[np.int8],
+    ) -> float:
+        """
+        Escalar P(nodo=1) fijando los dims FUERA de ejes al estado_inicial
+        y promediando solo sobre los dims EN ejes. Coste O(2^|ejes|) en vez de O(2^N).
+
+        Equivalente a marginalizar(ejes) seguido de seleccionar el estado inicial,
+        pero evita construir el array intermedio completo: primero selecciona el
+        sub-array indexado por estado_inicial en las dims fijas (tamaño 2^|ejes|)
+        y luego toma la media — clave para N grande donde |ejes| << N.
+        """
+        ejes_set = frozenset(int(e) for e in ejes)
+        clave = tuple(int(d) for d in self.dims if int(d) in ejes_set)
+        cached = self.valor_memo.get(clave)
+        if cached is None:
+            numero_dims = self.dims.size - 1
+            seleccion: list = [slice(None)] * self.dims.size
+            for dim_idx, dim in enumerate(self.dims):
+                if int(dim) not in ejes_set:
+                    # Fijar esta dim al estado inicial (misma convención que marginalizar).
+                    eje_local = numero_dims - dim_idx
+                    seleccion[eje_local] = int(estado_inicial[int(dim)])
+            cached = float(np.asarray(self.data[tuple(seleccion)]).mean())
+            self.valor_memo[clave] = cached
+        return cached
 
     def marginalizar(self, ejes: NDArray[np.int8]) -> "NCube":
         """

@@ -37,7 +37,7 @@ from openpyxl.utils import get_column_letter
 from src.models.base.application import aplicacion
 from src.controllers.manager import Manager
 from src.controllers.strategies.kgeomip import KGeoMIP
-from src.controllers.strategies.kgeomip import _serializar_particion
+from src.controllers.strategies.kgeomip import _serializar_particion, warmup_motor
 from src.funcs.base import ABECEDARY
 from src.lazy_tpm import cargar_tpm
 
@@ -414,12 +414,18 @@ def _guardar_excel_bloque(ruta_salida: Path, resultados: list) -> None:
 
 # ── Helpers de escritura incremental ──────────────────────────────────────
 
-def _crear_excel_bloque_inicial(ruta_salida: Path, pruebas_preparadas: list) -> None:
+def _crear_excel_bloque_inicial(
+    ruta_salida: Path,
+    pruebas_preparadas: list,
+    estado: str = "",
+    candidato: str = "",
+) -> None:
     """
     Crea el Excel con todas las filas pre-rellenadas (solo #Prueba, Alcance, Mecanismo).
     Las columnas Particion / Perdida / Tiempo quedan en 'pendiente...' hasta que
     cada prueba termine y se llame _actualizar_fila_excel.
     pruebas_preparadas debe estar en orden original del CSV (sorted by _orig_idx).
+    estado/candidato: se guardan en celdas aparte (filas de metadatos al final del lote).
     """
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -503,6 +509,24 @@ def _crear_excel_bloque_inicial(ruta_salida: Path, pruebas_preparadas: list) -> 
     ws.cell(row=fila_warm, column=6).fill = warm_fill
     ws.cell(row=fila_warm, column=6).alignment = center_align
     ws.row_dimensions[fila_warm].height = 22
+
+    # Metadatos del lote en celdas aparte: estado inicial y candidato (col 1 =
+    # etiqueta, col 2 = valor). Su #Prueba no es numérico → el dashboard las omite
+    # de la tabla y las muestra como cabecera.
+    meta_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    for offset, (etiqueta, valor) in enumerate(
+        (("Estado inicial", estado), ("Candidato", candidato)), start=1
+    ):
+        fila_meta = fila_warm + offset
+        for col in range(1, 7):
+            c = ws.cell(row=fila_meta, column=col)
+            c.fill = meta_fill
+            c.alignment = center_align
+        ws.cell(row=fila_meta, column=1, value=etiqueta).font = bold_font
+        vc = ws.cell(row=fila_meta, column=2, value=valor or "")
+        vc.font = Font(name="Consolas")
+        vc.alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[fila_meta].height = 20
 
     wb.save(ruta_salida)
 
@@ -805,7 +829,8 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
         ],
         key=lambda r: r["_orig_idx"],
     )
-    _crear_excel_bloque_inicial(ruta_salida, pruebas_para_excel)
+    _crear_excel_bloque_inicial(ruta_salida, pruebas_para_excel,
+                                estado=estado, candidato=bits_candidato)
     print(f" Excel creado ({len(pruebas_para_excel)} filas). Los resultados se guardarán prueba a prueba.")
     print(f"   {ruta_salida}\n")
 
@@ -814,26 +839,29 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
 
     resultados = []
 
-    print("\n Calentando procesos base y memoria caché (esto no contará en el tiempo de la primera prueba)...")
+    print("\n Calentando motor (Numba JIT + pool de hilos) — no cuenta en el tiempo del lote...")
     t_warm0 = time.time()
     try:
-        from src.models.core.system import System
-        from src.models.base.sia import _CANDIDATO_CACHE
-        from joblib import Parallel, delayed
-        import multiprocessing
+        # Paso 1: warmup de máquina — Numba JIT + pool de hilos joblib.
+        # warmup_motor() usa arrays mínimos de 2 nodos: sin efectos secundarios,
+        # sin crear directorios ni dependencias del lote actual.
+        warmup_motor()
 
+        # Paso 2: pre-caché del candidato condicionado para este lote.
+        # Evita que la primera prueba pague el coste de System + condicionar,
+        # que es específico de la TPM y el candidato pedidos en este modo bloque.
+        from src.models.base.sia import _CANDIDATO_CACHE
+        from src.models.core.system import System
+        _est_ini   = np.array(list(estado), dtype=np.int8)
         _dims_cond = np.array([i for i, b in enumerate(bits_candidato) if b == '0'], dtype=np.int8)
-        _est_ini   = np.array([c for c in estado], dtype=np.int8)
-        _ckey      = (id(tpm), tuple(_est_ini.tolist()), bits_candidato)
+        _ckey = (id(tpm), tuple(_est_ini.tolist()), bits_candidato)
         if _ckey not in _CANDIDATO_CACHE:
             _CANDIDATO_CACHE[_ckey] = System(tpm, _est_ini).condicionar(_dims_cond)
-
-        Parallel(n_jobs=max(1, multiprocessing.cpu_count() - 1))(delayed(lambda x: x)(i) for i in range(16))
     except Exception as _e:
         print(f" (Aviso en warmup: {_e})")
-    # Tiempo de "calentar motores": preparación explícita + la preparación del
-    # subsistema/tabla que reporta cada prueba (se acumula en el bucle, aparte
-    # del tiempo de búsqueda que se registra por prueba).
+    # tiempo_warmup_acum inicia con el coste del arranque del motor y luego
+    # acumula el tiempo de preparación de cada prueba (sia_preparar_subsistema +
+    # _construir_tabla_costos), separándolo del tiempo de búsqueda por prueba.
     tiempo_warmup_acum = time.time() - t_warm0
 
     def _silenciar_consola():
