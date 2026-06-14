@@ -1,0 +1,37 @@
+# Dependencias del proyecto AYDA 2026-1 (KGeoMIP + KQNodes + dashboard)
+# Python >= 3.11. Instalar con:  pip install -r requirements.txt
+# Versiones fijadas a las del entorno de desarrollo para reproducibilidad.
+
+# --- Núcleo numérico / científico ---
+numpy==2.4.3
+scipy==1.17.1
+pandas==3.0.1
+
+# --- IIT / EMD (cálculo de Phi) ---
+pyphi==1.2.0
+pyemd==2.0.0
+
+# --- Heurísticas / paralelismo (KGeoMIP) ---
+scikit-learn==1.8.0
+joblib==1.5.3
+numba==0.65.1
+
+# --- Reportes / I/O Excel ---
+openpyxl==3.1.5
+
+# --- Salida en consola / voz ---
+colorama==0.4.6
+pyttsx3==2.99
+comtypes==1.4.16
+
+# --- Profiling ---
+pyinstrument==5.1.2
+
+# --- Dashboard (servidor FastAPI) ---
+fastapi==0.136.3
+uvicorn==0.49.0
+pydantic==2.13.4
+
+# --- Utilidades / tests ---
+tqdm==4.67.3
+pytest==9.0.3

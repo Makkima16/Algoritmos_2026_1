@@ -175,7 +175,41 @@ colapso de memoria. Además `_construir_tabla_costos` avisa y estima memoria si 
 
 ---
 
-## 9. Changelog 2026-06-12 (correcciones y simplificación)
+## 9. GeoMIP vs QNodes — por qué GeoMIP es mejor en Φ para k≥3 a N grande
+
+Ambos frameworks comparten la misma métrica (L1 = EMD Hamming exacta), la misma
+representación asimétrica de bloques y el mismo motor greedy top-down + 1-move. La
+diferencia está en la **tercera familia del pool de cortes**:
+
+- **QNodes:** pool de O(N) cortes generado por 3 familias de aislamiento asimétrico
+  (simétrico, complemento, mecanismo vacío). Exploración directa sobre el espacio de
+  cortes; no usa geometría de la TPM.
+- **GeoMIP:** añade cortes derivados de la **afinidad espectral** de las columnas de la
+  tabla de costos `tabla_T` (similitud coseno entre nodos según su comportamiento
+  probabilístico). Esto expone particiones geométricamente motivadas que el greedy
+  asimétrico puro no genera.
+
+A N ≤ 20, ambos encuentran el mismo Φ (la geometría espectral no aporta ventaja sobre
+el greedy base a esos tamaños). A N ≥ 22, GeoMIP encuentra Φ menores para k≥3:
+
+| k | GeoMIP N=22 φ | QNodes N=22 φ | Δ | GeoMIP t | QNodes t |
+|---|--------------|--------------|---|---------|---------|
+| 2 | 0.499575 | 0.499575 | 0 (empate) | 31.9 s | **6.5 s** |
+| 3 | **0.999150** | 0.999189 | −0.000039 | 11.9 s | **6.1 s** |
+| 4 | **1.498764** | 1.498915 | −0.000151 | 10.7 s | **5.5 s** |
+| 5 | **1.998490** | 1.998667 | −0.000177 | 12.5 s | **5.8 s** |
+
+**Lo que GeoMIP sacrifica:** velocidad. QNodes es 2×–5× más rápido en N=22. El tiempo
+extra de GeoMIP es principalmente **arranque** (tabla de costos + matriz de afinidad),
+no búsqueda; ver `GeoMIP_Optimizaciones.md` §8 y el README del proyecto.
+
+**Para k=2:** QNodes usa el algoritmo de Queyranne (1998) que garantiza el **óptimo
+global exacto** de la bipartición. GeoMIP es heurístico y puede perderlo. El empate en
+N=22 es contingente; no hay garantía de que GeoMIP lo alcance siempre.
+
+---
+
+## 10. Changelog 2026-06-12 (correcciones y simplificación)
 
 Tres cambios al motor greedy top-down de `KGeoMIP`:
 

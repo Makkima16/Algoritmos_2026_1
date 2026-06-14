@@ -1,10 +1,19 @@
-# Decisión de Diseño: Retiro de la Búsqueda Local Iterada (ILS) en GeoMIP
+# Decisión de Diseño: ILS y VNS 2-move desactivados en GeoMIP
 
-**Fecha:** 2026-06-12
+**Fecha:** 2026-06-12 (retiro inicial del ILS) · revisado 2026-06-14 (reevaluación de ILS + VNS 2-move)
 **Archivo afectado:** `src/controllers/strategies/kgeomip.py`
 **Estado:** Vigente — supersede la descripción de la "Fase 4 / ILS" en
 `estrategia_k_particion.md`, `cambios_vs_original.md`, `GeoMIP_Optimizaciones.md`,
 `herramientas_y_ecuaciones.md` y `paradigmas_algoritmicos.md`.
+
+> **Actualización (2026-06-14).** Tras el retiro del 12-06 se volvieron a implementar,
+> a modo de experimento, **dos** mejoras de búsqueda local: (a) una **VNS 2-move**
+> (`_refinar_bloques_2move`) y (b) un **ILS ligero** (`_perturbacion_bloques` + re-refinar,
+> 2 reinicios con semilla fija). Ambas se midieron contra `greedy + 1-move` y **ninguna
+> mejoró Φ** en la suite, a un costo de 3–5×. Conclusión: se dejaron en el código como
+> referencia pero **desactivadas** mediante `N_VNS_MAX = 0` y `N_ILS_LIGHT = 0`. El motor
+> en producción sigue siendo `greedy top-down → 1-move → fin`, determinista. El detalle
+> empírico del 2-move (con tabla N22) está en `GeoMIP_Optimizaciones.md`, sección 7.
 
 ---
 
@@ -77,21 +86,33 @@ el presente vacío solo aparece cuando `permitir_presente_vacio=True`). La calid
 
 ## Qué cambió en el código
 
-- Eliminado el bucle ILS (Fase 4) dentro de `aplicar_estrategia`.
-- Eliminada la función auxiliar `_perturbar_bloques` (solo la usaba la ILS).
-- Eliminada la constante de módulo `N_ILS`.
+**Retiro inicial (2026-06-12):** se sacó la Fase 4 del flujo activo de `aplicar_estrategia`,
+dejando `greedy + 1-move` como motor.
+
+**Estado actual (2026-06-14):** ambas mejoras existen pero están **inactivas por
+constante de bucle = 0**, no eliminadas:
+
+- `_refinar_bloques_2move` (VNS) + bucle `N_VNS_MAX = 0` en `aplicar_estrategia`.
+- `_perturbacion_bloques` (ILS ligero) + bucle `N_ILS_LIGHT = 0` en `aplicar_estrategia`.
 - El refinamiento 1-move (`_refinar_bloques_1move`) y el invariante de no generar
-  bloques con futuro vacío permanecen intactos.
+  bloques con futuro vacío permanecen intactos como única fase de mejora activa.
+
+> Reactivar cualquiera es subir su constante (`N_VNS_MAX` / `N_ILS_LIGHT`) a > 0; el ILS
+> ligero ya usa semilla fija, así que conserva el determinismo si se reactiva.
 
 > Nota: la función `_evaluar_k_completo` (ruta simétrica alternativa, **no invocada**
-> por el flujo principal) conserva su propia lógica de ILS, irrelevante en runtime por
-> ser código inactivo.
+> por el flujo principal) conserva su propia lógica de ILS (`N_ILS = 4`), irrelevante en
+> runtime por ser código inactivo.
 
 ---
 
 ## Reversión
 
-Si en el futuro se desea reintroducir exploración tipo ILS (p. ej. para N grande donde
-los óptimos locales sean más frecuentes), basta con restaurar `_perturbar_bloques` y el
-bucle de perturbación + re-refinamiento tras la Fase 3, parametrizando `N_ILS` y, de
-preferencia, **fijando una semilla** para conservar el determinismo.
+El código de ambas mejoras ya está presente; reactivar exploración adicional (p. ej. para
+N grande donde los óptimos locales sean más frecuentes) solo requiere subir la constante
+del bucle correspondiente en `aplicar_estrategia`:
+
+- **ILS ligero:** `N_ILS_LIGHT > 0` (usa `_perturbacion_bloques`, con semilla fija → sigue
+  siendo determinista).
+- **VNS 2-move:** `N_VNS_MAX > 0` (usa `_refinar_bloques_2move`; recuerda su costo O(M²)
+  por pase, ver `GeoMIP_Optimizaciones.md` §7).

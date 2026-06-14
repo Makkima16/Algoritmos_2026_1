@@ -7,6 +7,7 @@ y utilidades de conversión etiquetas→binario para la ejecución por bloque de
 import re
 import csv
 import json
+from datetime import datetime
 from pathlib import Path
 
 import openpyxl
@@ -25,6 +26,79 @@ DATA_SCRIPTS = REPO_ROOT / "data"
 
 # Carpeta de resultados "manuales" — difiere por algoritmo.
 MANUAL_DIRNAME = {"qnodes": "manual", "geomip": "manually"}
+
+
+def _formatear_tiempo(segundos: float) -> str:
+    if segundos < 60:
+        return f"{segundos:.4f} s"
+    if segundos < 3600:
+        m = int(segundos // 60)
+        return f"{m} min {segundos % 60:.2f} s"
+    h = int(segundos // 3600)
+    resto = segundos % 3600
+    return f"{h} h {int(resto // 60)} min {resto % 60:.2f} s"
+
+
+def guardar_resultado_manual(algo: str, req: dict, resp: dict) -> str:
+    """Persiste una corrida manual como JSON en results/<manual|manually>/,
+    replicando el formato de los exec.py para que sea indistinguible de los
+    archivos generados desde la terminal. Devuelve la ruta del archivo escrito.
+
+    req:  petición original (/api/run) con estado, candidato, alcance, mecanismo, k…
+    resp: respuesta serializada del worker (perdida_phi, distribuciones, tiempos…).
+    """
+    root = ALGO_ROOTS[algo]
+    results_dir = root / "results" / MANUAL_DIRNAME[algo]
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    stem = Path(req["ruta_tpm"]).stem
+    fecha = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    estrategia = resp.get("estrategia", algo)
+
+    # Etiqueta de k en el nombre: KQNodes usa el k solicitado (o "All"); KGeoMIP
+    # toma el k efectivo de su estrategia ("...K=3...") o "optimal" si fue libre.
+    if algo == "geomip":
+        m = re.search(r"K=(\d+)", str(estrategia))
+        k_etiqueta = m.group(1) if m else "optimal"
+    else:
+        k_etiqueta = str(req["k"]) if req.get("k") is not None else "All"
+
+    nombre = f"resultado_{stem}_k{k_etiqueta}_{fecha}.json"
+    ruta_salida = results_dir / nombre
+
+    tiempo_total = float(resp.get("tiempo_total_segundos", 0.0))
+    tiempo_prep = float(resp.get("tiempo_preparacion_segundos", 0.0))
+
+    res_data = {
+        "dataset": Path(req["ruta_tpm"]).name,
+        "estado_inicial": req.get("estado", ""),
+        "sistema_candidato": req.get("candidato", ""),
+        "alcance": req.get("alcance", ""),
+        "mecanismo": req.get("mecanismo", ""),
+    }
+    if algo == "qnodes":
+        res_data["k_solicitado"] = req.get("k")
+        res_data["permitir_presente_vacio"] = req.get("permitir_presente_vacio", False)
+    res_data["estrategia"] = estrategia
+    res_data["perdida_phi"] = float(resp.get("perdida_phi", 0.0))
+    if algo == "geomip":
+        res_data["fundamento_eleccion"] = (
+            "Se seleccionó esta k-partición porque presenta la pérdida de información "
+            "(EMD) mínima global de todo el abanico evaluado."
+        )
+    res_data["distribucion_subsistema"] = resp.get("distribucion_subsistema")
+    res_data["distribucion_particion"] = resp.get("distribucion_particion")
+    res_data["particion"] = resp.get("particion", "")
+    res_data["tiempo_busqueda_segundos"] = (
+        tiempo_total if algo == "qnodes" else tiempo_total - tiempo_prep
+    )
+    res_data["tiempo_preparacion_segundos"] = tiempo_prep
+    res_data["tiempo_total_segundos"] = tiempo_total
+    res_data["tiempo_formateado"] = _formatear_tiempo(tiempo_total)
+
+    with open(ruta_salida, "w", encoding="utf-8") as f:
+        json.dump(res_data, f, indent=4, ensure_ascii=False)
+    return str(ruta_salida)
 
 
 # ── Etiquetas de nodo ──────────────────────────────────────────────────────
@@ -131,40 +205,85 @@ def listar_resultados(algo: str, tipo: str) -> list[dict]:
         d = root / "results" / MANUAL_DIRNAME[algo]
         if d.exists():
             for f in sorted(d.glob("*.json"), reverse=True):
+                estado, candidato = "", ""
+                try:
+                    with open(f, encoding="utf-8") as fh:
+                        jd = json.load(fh)
+                    estado = str(jd.get("estado_inicial", "") or "")
+                    candidato = str(jd.get("sistema_candidato", "") or "")
+                except Exception:
+                    pass
                 salida.append({
                     "archivo": f.name,
                     "ruta": str(f),
                     "formato": "json",
                     "mtime": f.stat().st_mtime,
+                    "estado": estado,
+                    "candidato": candidato,
                 })
     elif tipo == "block":
         d = root / "results" / "block"
         if d.exists():
             for f in sorted(d.rglob("*.xlsx"), reverse=True):
+                meta = _meta_xlsx(str(f))
                 salida.append({
                     "archivo": f.name,
                     "ruta": str(f),
                     "subcarpeta": f.parent.name,
                     "formato": "xlsx",
                     "mtime": f.stat().st_mtime,
+                    "estado": meta.get("estado", ""),
+                    "candidato": meta.get("candidato", ""),
                 })
     return salida
 
 
+# Etiquetas (col 1) de las filas de metadatos del lote escritas por block_writer.py
+# y los exec.py. Se extraen a `meta` y se omiten de las filas de datos.
+_META_LABELS = {"estado inicial": "estado", "candidato": "candidato"}
+
+
 def _leer_xlsx(ruta: str) -> dict:
-    """Lee un XLSX de bloque: encabezados de la fila 1 y filas de datos."""
+    """Lee un XLSX de bloque: encabezados (fila 1), filas de datos y metadatos
+    (estado inicial / candidato, guardados en celdas aparte)."""
     wb = openpyxl.load_workbook(ruta, read_only=True, data_only=True)
     ws = wb.active
     filas = list(ws.iter_rows(values_only=True))
     wb.close()
     if not filas:
-        return {"columnas": [], "filas": []}
+        return {"columnas": [], "filas": [], "meta": {}}
     columnas = [str(c) if c is not None else "" for c in filas[0]]
+    meta: dict = {}
     datos = []
     for fila in filas[1:]:
+        etiqueta = str(fila[0]).strip().lower() if fila and fila[0] is not None else ""
+        if etiqueta in _META_LABELS:
+            valor = fila[1] if len(fila) > 1 else None
+            meta[_META_LABELS[etiqueta]] = str(valor) if valor is not None else ""
+            continue
         datos.append({columnas[i] if i < len(columnas) else f"col{i}": fila[i]
                       for i in range(len(fila))})
-    return {"columnas": columnas, "filas": datos}
+    return {"columnas": columnas, "filas": datos, "meta": meta}
+
+
+def _meta_xlsx(ruta: str) -> dict:
+    """Extrae solo {estado, candidato} de un XLSX de bloque (para el listado)."""
+    try:
+        wb = openpyxl.load_workbook(ruta, read_only=True, data_only=True)
+        ws = wb.active
+        meta: dict = {}
+        for fila in ws.iter_rows(values_only=True):
+            if not fila or fila[0] is None:
+                continue
+            et = str(fila[0]).strip().lower()
+            if et in _META_LABELS:
+                meta[_META_LABELS[et]] = (
+                    str(fila[1]) if len(fila) > 1 and fila[1] is not None else ""
+                )
+        wb.close()
+        return meta
+    except Exception:
+        return {}
 
 
 def leer_detalle(ruta: str) -> dict:

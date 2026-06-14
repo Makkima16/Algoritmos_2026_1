@@ -80,29 +80,77 @@ mínimos locales superficiales del 1-move.
 
 ---
 
-### 4. Programación Dinámica (memoización)
+### 4. Algoritmo Exacto para Bipartición — Queyranne 1998 (k=2)
 
-**Utilizado:** sí — caché de distribuciones de bloque
+**Utilizado:** sí — en `QNodes._queyranne` / `_atomos_asimetricos` (desde 2026-06-13)
 
 **Descripción del uso:**
 
-`_dist_bloque(fut_pos, pre_pos)` es DP top-down: la distribución marginal de cada
-bloque (la operación más cara, `bipartir().distribucion_marginal()`) se computa una
-sola vez y se almacena en `_cache_bloque`:
+Para k=2 se usa el **algoritmo de Queyranne** (1998) para minimización exacta de
+funciones submodulares simétricas. La función de corte Φ(S) = Φ(bipartición S | V∖S)
+es submodular, por lo que Queyranne la minimiza en **O(N²) evaluaciones** sin enumerar
+los 2^(N-1) cortes posibles:
+
+```
+Fase de ordenamiento (tipo Prim / máxima adyacencia):
+  Mantener un conjunto de "afines". En cada paso, añadir el elemento
+  más afín al conjunto actual (máxima suma de aristas cruzadas). El
+  penúltimo y último elemento forman un par colgante.
+
+Contracción: el par colgante {s,t} da el mínimo corte {t}|{V∖{t}};
+  se contraen s y t, y se repite sobre el sistema reducido.
+  El mínimo de todos los cortes contraidoes es el global.
+```
+
+Los **2N átomos asimétricos** (N de futuro `({i},∅)` + N de presente `(∅,{j})`) son
+los "vértices" sobre los que opera Queyranne, cubriendo el espacio COMPLETO de
+biparticiones asimétricas.
+
+**Garantía:** el óptimo **global** de Φ para k=2, sin aproximación. Ninguna heurística
+(incluido GeoMIP k=2) puede garantizar esto.
+
+**Por qué no se usa para k≥3:** la minimización submodular sobre biparticiones
+(funciones de corte) no se extiende a k-particiones — el problema de k-corte para k≥3
+es NP-hard. Por eso k≥3 sigue usando greedy + ILS.
+
+---
+
+### 5. Programación Dinámica (memoización)
+
+**Utilizado:** sí — caché de distribuciones de bloque y de valores marginales
+
+**Descripción del uso:**
+
+Hay dos niveles de memoización desde 2026-06-13:
+
+**Nivel 1 — `_cache_bloque` en QNodes:**
+`_dist_bloque(fut_pos, pre_pos)` cachea el vector resultado por clave `(futuros, presentes)`.
+El mismo bloque reaparece en el descenso, el refinamiento y la ILS; se computa una sola vez.
 
 ```python
 def _dist_bloque(self, fut_pos, pre_pos):
     clave = (fut_pos, pre_pos)
     cache = self._cache_bloque.get(clave)
     if cache is None:
-        cache = self.sia_subsistema.bipartir(...).distribucion_marginal()
+        pre_global = frozenset(int(self._dims[q]) for q in pre_pos ...)
+        result = np.zeros(self._N, dtype=np.float64)
+        for p in fut_pos:
+            ncubo = self._ncubos_idx[int(self._idx[p])]
+            ejes = np.array([d for d in ncubo.dims if int(d) not in pre_global], dtype=np.int8)
+            result[p] = ncubo.marginal_valor(ejes, estado)   # ← nivel 2
+        cache = result
         self._cache_bloque[clave] = cache
     return cache
 ```
 
+**Nivel 2 — `valor_memo` en NCube:**
+`NCube.marginal_valor(ejes, estado_inicial)` cachea el escalar P(nodo=1) por el
+subconjunto de ejes a promediar (la clave no incluye `estado_inicial` porque es fijo
+para toda la sesión). Coste de la primera vez: O(2^|ejes|). Coste de reusos: O(1).
+
 **Por qué top-down y no bottom-up:** con el greedy + refinamiento + ILS, sólo aparece
-un subconjunto pequeño de los 2^N bloques posibles. La versión perezosa paga sólo por
-lo que se computa. La clave es `(frozenset, frozenset)`: hashing barato y estable.
+un subconjunto pequeño de los bloques posibles. La versión perezosa paga sólo por lo
+que se computa.
 
 ---
 
@@ -172,14 +220,15 @@ espectral quedó como fallback.)
 
 | Paradigma | Estado | Justificación |
 |---|---|---|
-| Greedy top-down (divisivo) | **Utilizado — principal** | O(N³); un descenso = jerarquía anidada de todos los k |
+| Greedy top-down (divisivo) | **Utilizado — principal (k≥3)** | O(N³); un descenso = jerarquía anidada de todos los k |
+| **Queyranne 1998 (exacto)** | **Utilizado — k=2** | Minimiza submodular simétrica exacto en O(N²); garantía global |
 | Heurístico (1-move futuro + presente) | **Utilizado — refinamiento** | Mejora post-greedy; movimiento presente exclusivo del esquema asimétrico |
 | Metaheurística (ILS) | **Utilizado — escape de mínimos** | Perturbación + re-refinamiento N-adaptativo |
-| Programación Dinámica (memoización) | **Utilizado — soporte** | `_cache_bloque` evita recalcular distribuciones |
+| Programación Dinámica (memoización) | **Utilizado — soporte** | `_cache_bloque` + `valor_memo` evitan recalcular distribuciones y valores |
 | Branch & Bound | **No** | Intratable para N ≥ 15 aun con poda |
 | Backtracking puro | **No** | Dominado por B&B |
 | Búsqueda exhaustiva | **Solo en BruteForce** | Ground truth para N ≤ 10 |
 | Genéticos / SA | **No** | Sin ventaja sobre ILS; menos pedagógico |
 | ILP | **No** | Objetivo no linealizable |
 | Divide y vencerás | **No** | Subproblemas no independientes |
-| Clustering espectral | **No (ver GeoMIP)** | Otro framework |
+| Clustering espectral | **No (ver GeoMIP)** | Otro framework; supera a QNodes k≥3 en N≥22 |

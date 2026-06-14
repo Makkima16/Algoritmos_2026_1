@@ -273,7 +273,11 @@ class System:
             NDArray[np.float32]: Este arreglo contiene cada elemento/variable de forma ordenada y consecutiva seleccionado específicamente en la clave formada por el estado inicial.
         """
         probabilidad: float
-        distribucion = np.empty(self.indices_ncubos.size, dtype=np.float32)
+        # float64 (no float32): el vector de marginales es de tamaño N (no la tabla
+        # de costos), así que no impacta memoria, y permite que QNodes, KGeoMIP y la
+        # fuerza bruta coincidan a ~1e-15. En float32 cada implementación redondea la
+        # media con distinto orden de reducción → diferencias visibles de ~1e-8.
+        distribucion = np.empty(self.indices_ncubos.size, dtype=np.float64)
 
         for i, ncubo in enumerate(self.ncubos):
             probabilidad = ncubo.data

@@ -29,18 +29,26 @@ los presentes — ya reproducía el Φ de GeoMIP; aquí se generaliza a todo k.
 
 Algoritmo
 ─────────
-1. Pool de cortes O(N): por cada nodo i se generan
+1. Queyranne exacto con 2N átomos ASIMÉTRICOS para todo N:
+       ({i},∅) para futuros  +  (∅,{j}) para presentes.
+       Queyranne explora TODO el espacio de biparticiones (fut,pre) de AYDA.
+       Garantía: bipartición k=2 globalmente óptima en la métrica exacta.
+       NCube.marginal_valor hace cada evaluación O(2^(N-|pre|)) en vez de O(2^N),
+       viable para todo N hasta ~25. Los pares colgantes (2N-2 candidatos)
+       forman el pool de cortes para k≥3.
+2. Pool de cortes O(N): por cada nodo i se generan
      ({i}, {pre_i})          aislamiento simétrico,
      (resto, resto_pre)      su complemento,
      ({i}, ∅)                aislamiento con mecanismo vacío (corte GeoMIP).
-2. Greedy top-down: se parte del bloque único (TODOS los futuros, TODOS los
-   presentes) y se aplican k-1 mejores divisiones usando el pool. Un solo
-   descenso registra Φ para CADA k (jerarquía nido → coherencia garantizada).
-3. Refinamiento local best-improvement sobre bloques:
+   Se combina con el pool de Queyranne (pares colgantes tienen prioridad).
+3. Greedy top-down: se parte del bloque único (TODOS los futuros, TODOS los
+   presentes) y se aplican k-1 mejores divisiones usando el pool combinado.
+   Un solo descenso registra Φ para CADA k (jerarquía nido → coherencia).
+4. Refinamiento local best-improvement sobre bloques:
      - movimiento futuro:  reubica un nodo futuro entre bloques,
      - movimiento presente (asimétrico): reubica el mecanismo de un nodo sin
        mover su futuro — imposible en representaciones simétricas.
-4. ILS — Búsqueda Local Iterada: perturba y re-refina el k ganador.
+5. ILS — Búsqueda Local Iterada: perturba y re-refina el k ganador.
 
 Métrica EMD (suma L1 marginal — EXACTA, no aproximada):
    La reconstrucción de toda k-partición es un producto de marginales por nodo
@@ -59,15 +67,18 @@ Memoización:
 """
 import random as _random_module
 import time
+from itertools import product
 from typing import Generator, Optional
 
 import numpy as np
 
+from src.funcs.force import particiones_en_k
 from src.middlewares.slogger import SafeLogger
 from src.middlewares.profile import gestor_perfilado, profile
 from src.funcs.format import fmt_k_bloques
 from src.funcs.iit import HAMMING_EMD_MAX_N
 from src.models.base.sia import SIA
+from src.models.core.ncube import NCube
 from src.models.core.solution import Solution
 from src.constants.models import (
     QNODES_ANALYSIS_TAG,
@@ -78,13 +89,24 @@ from src.constants.base import COLS_IDX, NET_LABEL, TYPE_TAG
 from src.models.base.application import aplicacion
 
 
-PERMITIR_PRESENTE_VACIO_POR_DEFECTO: bool = False
+# Default alineado con KGeoMIP y run_suite_2026 (convención del proyecto): la
+# k-MIP "real" permite mecanismo ∅. Antes era False, lo que dejaba a QNodes
+# explorando un espacio distinto al de KGeoMIP por defecto → Φ divergentes.
+PERMITIR_PRESENTE_VACIO_POR_DEFECTO: bool = True
 
 # Iteraciones base de Búsqueda Local Iterada (escala según N en _refinar_con_ils).
 _N_ILS: int = 4
 
 # Iteraciones de refinamiento por nivel en k=None (el ILS final refina el ganador).
 _MAX_ITER_NIVEL: int = 5
+
+# Para N ≤ _N_EXACTO se resuelve la k-MIP por enumeración exhaustiva (mismo espacio
+# que BruteForceKMIP): garantía de óptimo global exacto, así QNodes/KGeoMIP/fuerza
+# bruta coinciden en CSVs pequeños. _CAP_EXACTO acota configuraciones por k para no
+# colgar (si se excede, ese tamaño cae a la heurística).
+_N_EXACTO: int = 6
+_CAP_EXACTO: int = 300_000
+
 
 
 # Un bloque asimétrico: (frozenset futuros_pos, frozenset presentes_pos).
@@ -126,6 +148,7 @@ class QNodes(SIA):
         self._cache_bloque: dict[tuple, np.ndarray] = {}
         self._idx: np.ndarray = np.array([], dtype=np.int8)
         self._dims: np.ndarray = np.array([], dtype=np.int8)
+        self._ncubos_idx: dict[int, NCube] = {}
         # Última k-partición ganadora (expuesta para validación/comparación externa).
         self.mejor_bloques: list = []
 
@@ -147,6 +170,9 @@ class QNodes(SIA):
         self._N = len(self._idx)
         self._n_dims = len(self._dims)
 
+        # Índice O(1) NCube por índice global (para marginal_valor en _dist_bloque).
+        self._ncubos_idx = {int(nc.indice): nc for nc in self.sia_subsistema.ncubos}
+
         # Limpiar caché entre ejecuciones independientes
         self._cache_bloque.clear()
 
@@ -165,33 +191,21 @@ class QNodes(SIA):
         if k is not None and (k < 2 or k > self._N):
             raise ValueError(f"k={k} fuera del rango permitido [2, {self._N}]")
 
-        pool = self._construir_pool_cortes()
+        # ── Ruta EXACTA para N pequeño ──────────────────────────────────────
+        # Enumera todas las k-particiones asimétricas válidas (mismo espacio que
+        # BruteForceKMIP) y devuelve el óptimo global. Garantiza que QNodes coincide
+        # con la fuerza bruta y con KGeoMIP en CSVs pequeños, sin depender de que la
+        # heurística alcance el óptimo. Devuelve None si el espacio supera el cap.
+        exacto = None
+        if self._N <= _N_EXACTO:
+            exacto = self._resolver_exacto(k, permitir_presente_vacio)
 
-        if k is not None:
-            # k especificado: greedy hasta k, refinamiento local, ILS final.
-            mejor_phi, mejor_bloques = self._greedy_bloques(pool, k)
-            mejor_phi, mejor_bloques = self._refinar_bloques(mejor_bloques, mejor_phi)
-            mejor_phi, mejor_bloques = self._refinar_con_ils(mejor_bloques, mejor_phi)
+        if exacto is not None:
+            mejor_phi, mejor_bloques = exacto
         else:
-            # k libre: descenso greedy completo (un Φ por cada k), refinamiento
-            # ligero por nivel, y se elige el k ≥ 3 con menor Φ para el ILS final.
-            historico = self._greedy_descenso(pool)
-
-            historico_refinado: dict[int, tuple[float, list]] = {}
-            for k_nivel, (phi_nivel, bloques_nivel) in historico.items():
-                if k_nivel < 2:
-                    continue
-                phi_r, bloques_r = self._refinar_bloques(
-                    bloques_nivel, phi_nivel, max_iter=_MAX_ITER_NIVEL
-                )
-                historico_refinado[k_nivel] = (phi_r, bloques_r)
-
-            candidatos_k3 = {kk: ph for kk, (ph, _) in historico_refinado.items() if kk >= 3}
-            if not candidatos_k3:
-                candidatos_k3 = {kk: ph for kk, (ph, _) in historico_refinado.items()}
-            mejor_k = min(candidatos_k3, key=candidatos_k3.get)
-            mejor_phi, mejor_bloques = historico_refinado[mejor_k]
-            mejor_phi, mejor_bloques = self._refinar_con_ils(mejor_bloques, mejor_phi)
+            mejor_phi, mejor_bloques = self._resolver_heuristico(
+                k, permitir_presente_vacio
+            )
 
         # Expone la k-partición ganadora para comparación externa (validación).
         self.mejor_bloques = mejor_bloques
@@ -216,6 +230,148 @@ class QNodes(SIA):
             tiempo_preparacion=self.sia_tiempo_preparacion,
             particion=fmt_mip,
         )
+
+    # ── Solver exacto (fuerza bruta) para N pequeño ────────────────────────
+
+    @staticmethod
+    def _stirling2(n: int, k: int) -> int:
+        """Número de Stirling de segunda especie S(n, k) (DP iterativo)."""
+        if k < 0 or k > n:
+            return 0
+        if k == 0:
+            return 1 if n == 0 else 0
+        fila = [0] * (k + 1)
+        fila[0] = 1
+        for _ in range(1, n + 1):
+            nueva = [0] * (k + 1)
+            for j in range(1, k + 1):
+                nueva[j] = j * fila[j] + fila[j - 1]
+            fila = nueva
+        return fila[k]
+
+    def _resolver_exacto(
+        self, k: Optional[int], permitir_vacio: bool
+    ) -> "Optional[tuple[float, list]]":
+        """
+        Enumera exhaustivamente las k-particiones asimétricas válidas y devuelve
+        (Φ mínimo, bloques) — réplica del espacio de BruteForceKMIP usando el
+        mismo _emd_bloques de QNodes, así el óptimo es idéntico bit a bit.
+
+        Para cada k: particiones de los N futuros en k bloques no vacíos
+        (Stirling2(N,k)) × asignaciones de los n_dims presentes a los k bloques
+        (k^n_dims). Con permitir_vacio=False descarta asignaciones que dejen algún
+        bloque sin presente. Si el espacio de algún k requerido supera _CAP_EXACTO
+        devuelve None (el llamador usa la heurística).
+
+        Returns:
+            (phi, bloques) del mejor k (o del k pedido), o None si no es tratable.
+        """
+        ks = [k] if k is not None else list(range(2, self._N + 1))
+        for kk in ks:
+            if self._stirling2(self._N, kk) * (kk ** self._n_dims) > _CAP_EXACTO:
+                return None
+
+        futuros = list(range(self._N))
+        mejor_por_k: dict[int, tuple[float, list]] = {}
+
+        for kk in ks:
+            mejor_phi = float("inf")
+            mejor_bloques: Optional[list] = None
+            for part_fut in particiones_en_k(futuros, kk):
+                bloques_fut = [frozenset(b) for b in part_fut]
+                if self._n_dims == 0:
+                    bloques = [(bloques_fut[i], frozenset()) for i in range(kk)]
+                    phi = self._emd_bloques(bloques)
+                    if phi < mejor_phi:
+                        mejor_phi, mejor_bloques = phi, bloques
+                    continue
+                for asignacion in product(range(kk), repeat=self._n_dims):
+                    pre_sets: list[list[int]] = [[] for _ in range(kk)]
+                    for pos_pre, b_idx in enumerate(asignacion):
+                        pre_sets[b_idx].append(pos_pre)
+                    if not permitir_vacio and any(len(s) == 0 for s in pre_sets):
+                        continue
+                    bloques = [
+                        (bloques_fut[i], frozenset(pre_sets[i])) for i in range(kk)
+                    ]
+                    phi = self._emd_bloques(bloques)
+                    if phi < mejor_phi:
+                        mejor_phi, mejor_bloques = phi, bloques
+            if mejor_bloques is not None:
+                mejor_por_k[kk] = (mejor_phi, mejor_bloques)
+
+        if not mejor_por_k:
+            return None
+        if k is not None:
+            return mejor_por_k.get(k)
+        # k libre: preferir k ≥ 3 si existe (coherente con la rama heurística).
+        candidatos = {kk: v for kk, v in mejor_por_k.items() if kk >= 3} or mejor_por_k
+        mejor_k = min(candidatos, key=lambda kk: candidatos[kk][0])
+        return candidatos[mejor_k]
+
+    # ── Solver heurístico (greedy + refinamiento + ILS) ────────────────────
+
+    def _resolver_heuristico(
+        self, k: Optional[int], permitir_presente_vacio: bool
+    ) -> "tuple[float, list]":
+        """Pipeline heurístico original: Queyranne k=2 + greedy top-down + ILS."""
+        # Universo de átomos según el flag: asimétrico (2N, permite ∅) cuando se
+        # permite mecanismo vacío; simétrico (N, ({i},{i})) cuando NO se permite,
+        # para que ningún corte de Queyranne deje un bloque con futuro sin presente.
+        # marginal_valor hace cada evaluación O(2^(N-|pre|)) en vez de O(2^N).
+        atomos = (
+            self._atomos_asimetricos()
+            if permitir_presente_vacio
+            else self._atomos_simetricos()
+        )
+        phi_q2, bloques_q2, pool_pendant = self._queyranne(atomos)
+
+        # Pool combinado: pares colgantes de Queyranne (prioridad) + geométrico O(N).
+        pool_geo = self._construir_pool_cortes()
+        _vistos: set = set()
+        pool: list = []
+        for _corte in pool_pendant + pool_geo:
+            _clave = (frozenset(_corte[0]), frozenset(_corte[1]))
+            if _clave not in _vistos:
+                _vistos.add(_clave)
+                pool.append(_clave)
+
+        if k is not None:
+            if k == 2:
+                # phi_q2 es el óptimo global exacto (2N átomos asimétricos).
+                mejor_phi, mejor_bloques = phi_q2, bloques_q2
+            else:
+                mejor_phi, mejor_bloques = self._greedy_bloques(pool, k)
+            mejor_phi, mejor_bloques = self._refinar_bloques(mejor_bloques, mejor_phi)
+            mejor_phi, mejor_bloques = self._refinar_con_ils(mejor_bloques, mejor_phi)
+        else:
+            # k libre: descenso con pool enriquecido + refinamiento por nivel.
+            historico = self._greedy_descenso(pool)
+
+            historico_refinado: dict[int, tuple[float, list]] = {}
+            for k_nivel, (phi_nivel, bloques_nivel) in historico.items():
+                if k_nivel < 2:
+                    continue
+                phi_r, bloques_r = self._refinar_bloques(
+                    bloques_nivel, phi_nivel, max_iter=_MAX_ITER_NIVEL
+                )
+                historico_refinado[k_nivel] = (phi_r, bloques_r)
+
+            # Inyectar k=2 de Queyranne si mejora el histórico del descenso greedy.
+            phi_q2_r, bloques_q2_r = self._refinar_bloques(
+                bloques_q2, phi_q2, max_iter=_MAX_ITER_NIVEL
+            )
+            if 2 not in historico_refinado or phi_q2_r < historico_refinado[2][0]:
+                historico_refinado[2] = (phi_q2_r, bloques_q2_r)
+
+            candidatos_k3 = {kk: ph for kk, (ph, _) in historico_refinado.items() if kk >= 3}
+            if not candidatos_k3:
+                candidatos_k3 = {kk: ph for kk, (ph, _) in historico_refinado.items()}
+            mejor_k = min(candidatos_k3, key=candidatos_k3.get)
+            mejor_phi, mejor_bloques = historico_refinado[mejor_k]
+            mejor_phi, mejor_bloques = self._refinar_con_ils(mejor_bloques, mejor_phi)
+
+        return mejor_phi, mejor_bloques
 
     # ── Pool de cortes asimétricos ─────────────────────────────────────────
 
@@ -257,6 +413,165 @@ class QNodes(SIA):
 
         return pool
 
+    # ── Generadores de átomos para Queyranne ──────────────────────────────
+
+    def _atomos_asimetricos(self) -> "list[tuple[frozenset, frozenset]]":
+        """
+        2N átomos para el universo asimétrico completo (N ≤ _QUEYRANNE_N_MAX).
+
+        N átomos futuros  ({i}, ∅)  para i = 0..N-1
+        N átomos presentes (∅, {j}) para j = 0..n_dims-1
+
+        Queyranne puede descubrir cualquier corte (S_fut, S_pre) donde futuros
+        y presentes se distribuyen de forma completamente independiente.
+        Precalienta _cache_bloque para los singletons futuros (se reutilizan
+        en la evaluación _f({k},∅) de cada delta en el bucle interno).
+        """
+        atomos: list[tuple[frozenset, frozenset]] = (
+            [(frozenset({i}), frozenset()) for i in range(self._N)]
+            + [(frozenset(), frozenset({j})) for j in range(self._n_dims)]
+        )
+        for fut, pre in atomos:
+            if fut:
+                self._dist_bloque(fut, pre)
+        return atomos
+
+    def _atomos_simetricos(self) -> "list[tuple[frozenset, frozenset]]":
+        """
+        N átomos SIMÉTRICOS ({i}, {i}) — universo para permitir_presente_vacio=False.
+
+        Cada átomo acopla el futuro i con su propio presente i (∅ solo si i no tiene
+        mecanismo, i ≥ n_dims). Así TODO corte de Queyranne lleva el presente junto
+        a su futuro: ningún bloque con futuro queda sin mecanismo cuando el sistema
+        tiene mecanismo para esos nodos. Es el universo correcto cuando NO se permite
+        mecanismo ∅, a diferencia de los 2N átomos asimétricos (que sí generan ∅).
+        """
+        atomos: list[tuple[frozenset, frozenset]] = [
+            (frozenset({i}), frozenset({i}) if i < self._n_dims else frozenset())
+            for i in range(self._N)
+        ]
+        for fut, pre in atomos:
+            if fut:
+                self._dist_bloque(fut, pre)
+        return atomos
+
+    # ── Algoritmo de Queyranne (núcleo genérico) ───────────────────────────
+
+    def _queyranne(
+        self,
+        atomos: "list[tuple[frozenset, frozenset]]",
+    ) -> "tuple[float, list[tuple[frozenset, frozenset]], list[tuple[frozenset, frozenset]]]":
+        """
+        Algoritmo de Queyranne sobre un conjunto de átomos arbitrario.
+
+        Minimiza f(S) = _emd_bloques(S | V-S) en O(|atomos|²) evaluaciones de
+        bipartición, usando ordenamiento por adyacencia máxima (maximum adjacency
+        ordering) y contracción del par colgante de cada fase.
+
+        f es simétrica (f(S)=f(V-S)) y submodular: hereda ambas propiedades de
+        la suma L1 marginal sobre distribuciones producto con métrica de Hamming
+        separable. Con estas dos propiedades la garantía de Queyranne aplica: el
+        par colgante de ALGUNA fase es la bipartición k=2 óptima en el espacio
+        de los átomos dados.
+
+        Soporta dos universos de átomos (ver _atomos_asimetricos / _atomos_simetricos):
+          • Asimétrico (2N átomos): átomos presentes-only (fut=∅) se registran
+            por su complemento al encontrarlos como par colgante.
+          • Simétrico (N átomos): todos los átomos tienen fut≠∅; la diagonal
+            crece coherentemente en cada contracción.
+
+        _cache_bloque es compartido: las evaluaciones de Queyranne precalientan
+        el caché para el greedy y el refinamiento que corren después.
+        omega_fut/pre se mantienen incrementales — O(1) por iteración interna.
+
+        Retorna:
+            phi_k2:       Φ de la bipartición k=2 óptima hallada.
+            bloques_k2:   Los dos bloques asimétricos de esa bipartición.
+            pool_pendant: Todos los pares colgantes (un candidato por fase).
+        """
+        all_fut = frozenset(range(self._N))
+        all_pre = frozenset(range(self._n_dims))
+
+        def _f(s_fut: frozenset, s_pre: frozenset) -> float:
+            comp_fut = all_fut - s_fut
+            comp_pre = all_pre - s_pre
+            partes: list = []
+            if s_fut:
+                partes.append((s_fut, s_pre))
+            if comp_fut:
+                partes.append((comp_fut, comp_pre))
+            if len(partes) < 2:
+                return float("inf")
+            # Con presente vacío deshabilitado, un bloque con futuro pero sin
+            # mecanismo es inválido: descártalo para que Queyranne no lo elija.
+            if not self._permitir_presente_vacio and any(
+                fut and not pre for fut, pre in partes
+            ):
+                return float("inf")
+            return self._emd_bloques(partes)
+
+        fase_atomos: list[tuple[frozenset, frozenset]] = list(atomos)
+        candidatos: dict[tuple[frozenset, frozenset], float] = {}
+
+        while len(fase_atomos) > 2:
+            omegas: list[tuple[frozenset, frozenset]] = [fase_atomos[0]]
+            deltas: list[tuple[frozenset, frozenset]] = list(fase_atomos[1:])
+            omega_fut: frozenset = fase_atomos[0][0]
+            omega_pre: frozenset = fase_atomos[0][1]
+
+            for _ in range(len(deltas) - 1):
+                min_ganancia = float("inf")
+                mejor_k = 0
+                for k_idx, (v_fut, v_pre) in enumerate(deltas):
+                    ganancia = _f(omega_fut | v_fut, omega_pre | v_pre) - _f(v_fut, v_pre)
+                    if ganancia < min_ganancia:
+                        min_ganancia = ganancia
+                        mejor_k = k_idx
+
+                elegido_fut, elegido_pre = deltas[mejor_k]
+                omega_fut = omega_fut | elegido_fut
+                omega_pre = omega_pre | elegido_pre
+                omegas.append(deltas[mejor_k])
+                deltas.pop(mejor_k)
+
+            pendant_fut, pendant_pre = deltas[0]
+            if pendant_fut:
+                candidatos[(pendant_fut, pendant_pre)] = _f(pendant_fut, pendant_pre)
+            else:
+                # Átomo presente-only (modo asimétrico): registrar complemento.
+                comp_fut = all_fut - pendant_fut
+                comp_pre = all_pre - pendant_pre
+                if comp_fut:
+                    candidatos[(comp_fut, comp_pre)] = _f(comp_fut, comp_pre)
+
+            omegas[-1] = (omegas[-1][0] | pendant_fut, omegas[-1][1] | pendant_pre)
+            fase_atomos = omegas
+
+        for at_fut, at_pre in fase_atomos:
+            if at_fut:
+                candidatos[(at_fut, at_pre)] = _f(at_fut, at_pre)
+
+        if not candidatos:
+            phi = self._emd_bloques([(all_fut, all_pre)])
+            return phi, [(all_fut, all_pre)], []
+
+        mejor_corte = min(candidatos, key=candidatos.get)
+        mejor_phi = candidatos[mejor_corte]
+        mejor_fut, mejor_pre = mejor_corte
+
+        bloques_k2: list[tuple[frozenset, frozenset]] = []
+        if mejor_fut:
+            bloques_k2.append((mejor_fut, mejor_pre))
+        comp_fut = all_fut - mejor_fut
+        if comp_fut:
+            bloques_k2.append((comp_fut, all_pre - mejor_pre))
+
+        pool_pendant: list[tuple[frozenset, frozenset]] = [
+            (frozenset(f), frozenset(p)) for f, p in candidatos if f
+        ]
+
+        return mejor_phi, bloques_k2, pool_pendant
+
     # ── Greedy top-down sobre bloques asimétricos ──────────────────────────
 
     def _mejor_split_bloques(
@@ -286,6 +601,11 @@ class QNodes(SIA):
                     continue  # cada bloque debe conservar ≥1 futuro
                 inside = (in_eff, pre_b & cut_pre)
                 outside = (out_eff, pre_b - cut_pre)
+                # Sin presente vacío: ningún lado del corte puede quedar sin mecanismo.
+                if not self._permitir_presente_vacio and (
+                    not inside[1] or not outside[1]
+                ):
+                    continue
                 cfg = bloques[:pos] + [inside, outside] + bloques[pos + 1:]
                 phi = self._emd_bloques(cfg)
                 if phi < mejor_phi:
@@ -375,6 +695,9 @@ class QNodes(SIA):
 
             # Movimientos presentes (asimétrico)
             for i, (eff_i, pre_i) in enumerate(bloques):
+                # Sin presente vacío: no sacar el único mecanismo de un bloque.
+                if not self._permitir_presente_vacio and len(pre_i) <= 1:
+                    continue
                 for nodo in pre_i:
                     for j in range(k):
                         if i == j:
@@ -394,6 +717,95 @@ class QNodes(SIA):
             phi = mejor_phi
 
         return phi, bloques
+
+    # ── 2-move sistemático (VNS) ───────────────────────────────────────────
+
+    def _refinar_bloques_2move(
+        self,
+        bloques: "list[tuple[frozenset, frozenset]]",
+        phi: float,
+    ) -> "tuple[float, list, bool]":
+        """
+        2-move sistemático post-convergencia 1-move (VNS).
+
+        Evalúa todos los pares de movimientos 1-move independientes aplicados
+        simultáneamente y devuelve el mejor par que mejore phi.
+
+        Un par (mov_a, mov_b) es descartado si el nodo que mueve mov_b ya fue
+        reubicado por mov_a (detección implícita por ausencia en el bloque fuente).
+
+        Returns:
+            (phi, bloques, mejoro) — mejoro=True si se encontró mejora.
+        """
+        k = len(bloques)
+
+        movimientos: list = []
+        for i, (eff_i, pre_i) in enumerate(bloques):
+            if len(eff_i) > 1:
+                for nodo in sorted(eff_i):
+                    for j in range(k):
+                        if j != i:
+                            movimientos.append(("f", i, j, nodo))
+            # Sin presente vacío: no generar movimientos que saquen el único mecanismo.
+            if not self._permitir_presente_vacio and len(pre_i) <= 1:
+                continue
+            for nodo in sorted(pre_i):
+                for j in range(k):
+                    if j != i:
+                        movimientos.append(("p", i, j, nodo))
+
+        mejor_phi = phi
+        mejor_cfg: list | None = None
+        M = len(movimientos)
+
+        for a in range(M):
+            tipo_a, i_a, j_a, nodo_a = movimientos[a]
+            bl_a = list(bloques)
+            eff_ia, pre_ia = bl_a[i_a]
+            eff_ja, pre_ja = bl_a[j_a]
+            if tipo_a == "f":
+                if nodo_a not in eff_ia:
+                    continue
+                bl_a[i_a] = (eff_ia - {nodo_a}, pre_ia)
+                bl_a[j_a] = (eff_ja | {nodo_a}, pre_ja)
+            else:
+                if nodo_a not in pre_ia:
+                    continue
+                bl_a[i_a] = (eff_ia, pre_ia - {nodo_a})
+                bl_a[j_a] = (eff_ja, pre_ja | {nodo_a})
+
+            for b in range(a + 1, M):
+                tipo_b, i_b, j_b, nodo_b = movimientos[b]
+                bl_b = list(bl_a)
+                eff_ib, pre_ib = bl_b[i_b]
+                eff_jb, pre_jb = bl_b[j_b]
+                if tipo_b == "f":
+                    if nodo_b not in eff_ib or len(eff_ib) <= 1:
+                        continue
+                    bl_b[i_b] = (eff_ib - {nodo_b}, pre_ib)
+                    bl_b[j_b] = (eff_jb | {nodo_b}, pre_jb)
+                else:
+                    if nodo_b not in pre_ib:
+                        continue
+                    bl_b[i_b] = (eff_ib, pre_ib - {nodo_b})
+                    bl_b[j_b] = (eff_jb, pre_jb | {nodo_b})
+
+                if any(not eff for eff, _ in bl_b):
+                    continue
+                # Sin presente vacío: el par combinado no puede dejar bloques sin mecanismo.
+                if not self._permitir_presente_vacio and any(
+                    not pre for _, pre in bl_b
+                ):
+                    continue
+
+                phi_cand = self._emd_bloques(bl_b)
+                if phi_cand < mejor_phi - 1e-10:
+                    mejor_phi = phi_cand
+                    mejor_cfg = bl_b
+
+        if mejor_cfg is not None:
+            return mejor_phi, mejor_cfg, True
+        return phi, bloques, False
 
     # ── Perturbación + ILS ─────────────────────────────────────────────────
 
@@ -427,7 +839,9 @@ class QNodes(SIA):
                 result[i] = (eff_i - {nodo}, pre_i)
                 result[j] = (eff_j | {nodo}, pre_j)
             else:  # movimiento presente (asimétrico)
-                candidatos = [i for i, (_, p) in enumerate(result) if len(p) > 0]
+                # Sin presente vacío: solo bloques con ≥2 mecanismos pueden ceder uno.
+                minimo_pre = 0 if self._permitir_presente_vacio else 1
+                candidatos = [i for i, (_, p) in enumerate(result) if len(p) > minimo_pre]
                 if not candidatos:
                     continue
                 i = rng.choice(candidatos)
@@ -457,6 +871,19 @@ class QNodes(SIA):
         n_ils = max(1, _N_ILS - max(0, (self._N - 16) // 2))
 
         mejor_phi, mejor_bloques = self._refinar_bloques(bloques, phi, max_iter=max_it)
+
+        # VNS: ciclos 2-move + 1-move hasta que no haya mejora (máx 3 ciclos).
+        N_VNS_MAX = 3
+        for _ in range(N_VNS_MAX):
+            phi_2m, bloques_2m, mejoro_2m = self._refinar_bloques_2move(
+                mejor_bloques, mejor_phi
+            )
+            if not mejoro_2m:
+                break
+            phi_ref, bloques_ref = self._refinar_bloques(bloques_2m, phi_2m, max_iter=max_it)
+            if phi_ref < mejor_phi - 1e-9:
+                mejor_phi = phi_ref
+                mejor_bloques = bloques_ref
 
         n_mov = max(1, self._N // 4)
         for iter_ils in range(n_ils):
@@ -499,28 +926,34 @@ class QNodes(SIA):
         """
         Distribución marginal del bloque (futuros, presentes), calculada una vez.
 
-        El futuro del bloque (índices globales indices_ncubos[p]) se condiciona
-        sobre el mecanismo del bloque (índices globales dims_ncubos[p]), que puede
-        diferir del propio futuro (corte asimétrico) o estar vacío (mecanismo ∅).
+        Usa NCube.marginal_valor: fija los dims del mecanismo al estado inicial y
+        promedia solo sobre los dims restantes → O(2^(N-|pre|)) por cubo en vez de
+        O(2^N) de bipartir→marginalizar. Para |pre|≈N/2 esto es un speedup de 2^(N/2)
+        (×1000 en N=20). El resultado es idéntico por linealidad del valor esperado:
+        E_{V-pre}[data[pre=s0, •]] == marginalizar(V-pre)[s0].
+
+        Resultado en float64: igual que `System.distribucion_marginal` (float64) y que
+        la fuerza bruta. El vector es de tamaño N (no la tabla de costos), así que
+        float64 no impacta memoria y hace que QNodes, KGeoMIP y la fuerza bruta
+        coincidan a ~1e-15 en vez de diferir ~1e-8 por redondeo en float32.
         """
         clave = (fut_pos, pre_pos)
         cache = self._cache_bloque.get(clave)
         if cache is None:
-            futuros = np.fromiter(
-                (self._idx[p] for p in sorted(fut_pos)), dtype=np.int8, count=len(fut_pos)
+            pre_global: frozenset = frozenset(
+                int(self._dims[q]) for q in pre_pos if q < self._n_dims
             )
-            presentes_pos = [p for p in sorted(pre_pos) if p < self._n_dims]
-            presentes = (
-                np.fromiter((self._dims[p] for p in presentes_pos), dtype=np.int8,
-                            count=len(presentes_pos))
-                if presentes_pos
-                else np.array([], dtype=np.int8)
-            )
-            cache = (
-                self.sia_subsistema
-                .bipartir(futuros, presentes)
-                .distribucion_marginal()
-            )
+            estado = self.sia_subsistema.estado_inicial
+            result = np.zeros(self._N, dtype=np.float64)
+            for p in fut_pos:
+                ncubo = self._ncubos_idx[int(self._idx[p])]
+                # Ejes a promediar = dims del cubo NO en el mecanismo.
+                ejes = np.array(
+                    [d for d in ncubo.dims if int(d) not in pre_global],
+                    dtype=np.int8,
+                )
+                result[p] = ncubo.marginal_valor(ejes, estado)
+            cache = result
             self._cache_bloque[clave] = cache
         return cache
 

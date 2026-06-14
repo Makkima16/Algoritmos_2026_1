@@ -43,6 +43,8 @@ def escribir_xlsx_bloque(
     filas: list[dict],
     tiempo_total: float,
     tiempo_arranque: float = 0.0,
+    estado: str = "",
+    candidato: str = "",
 ) -> None:
     """
     filas: lista en orden original con claves
@@ -50,6 +52,8 @@ def escribir_xlsx_bloque(
     tiempo_total: wall-clock del lote completo.
     tiempo_arranque: acumulado de preparación del subsistema (warmup), aparte del
         tiempo de búsqueda; se reporta en su propia fila como en exec.py.
+    estado:    estado inicial del lote (cadena binaria), guardado en celda aparte.
+    candidato: sistema candidato del lote (cadena binaria), guardado en celda aparte.
     """
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -115,6 +119,24 @@ def escribir_xlsx_bloque(
     wc = ws.cell(row=fila_warm, column=6, value=formatear_tiempo(tiempo_arranque))
     wc.font = Font(bold=True)
     ws.row_dimensions[fila_warm].height = 22
+
+    # Filas de metadatos del lote: estado inicial y candidato en celdas aparte
+    # (col 1 = etiqueta, col 2 = valor). Su #Prueba no es numérico, así que el
+    # frontend las omite de la tabla de pruebas y las muestra como cabecera.
+    meta_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    for offset, (etiqueta, valor) in enumerate(
+        (("Estado inicial", estado), ("Candidato", candidato)), start=1
+    ):
+        fila_meta = fila_warm + offset
+        for col in range(1, 7):
+            cc = ws.cell(row=fila_meta, column=col)
+            cc.fill = meta_fill
+            cc.alignment = center
+        ws.cell(row=fila_meta, column=1, value=etiqueta).font = Font(bold=True)
+        vc = ws.cell(row=fila_meta, column=2, value=valor or "")
+        vc.font = Font(name="Consolas")
+        vc.alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[fila_meta].height = 20
 
     ruta_salida.parent.mkdir(parents=True, exist_ok=True)
     wb.save(ruta_salida)

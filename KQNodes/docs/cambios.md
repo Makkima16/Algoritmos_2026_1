@@ -2,11 +2,15 @@
 
 **Referencia:** `projecto-analisis-20261/QNodes` → `AYDA_2026_1/QNodes`
 
-> **Estado actual (2026-06-12):** QNodes es un **motor asimétrico unificado**
-> (greedy top-down + refinamiento 1-move futuro/presente + ILS, con métrica L1 marginal =
-> EMD de Hamming exacta). Desde 2026-06-12 el flag `permitir_presente_vacio` se respeta
-> correctamente (ver sección 1 e Historial). Este documento describe el estado vigente;
-> las secciones finales conservan el historial de la evolución.
+> **Estado actual (2026-06-13):** QNodes es un **motor asimétrico unificado** con
+> dos capas de optimización que lo hacen viable para N ≥ 20:
+> - **Capa de evaluación:** `NCube.marginal_valor` reemplazó a `bipartir→marginalizar→distribucion_marginal`
+>   → cada evaluación de bloque pasa de O(2^N) a O(2^(N-|mecanismo|)), speedup ×145 en N=20.
+> - **Capa de búsqueda k=2:** el algoritmo de Queyranne (1998) con 2N átomos asimétricos
+>   garantiza el óptimo global exacto de la bipartición en O(N²) evaluaciones.
+>
+> Sin embargo, para k ≥ 3 en N ≥ 22, la heurística greedy+ILS de QNodes queda por
+> detrás de GeoMIP en calidad de Φ (ver §9). Este documento describe la evolución completa.
 
 ---
 
@@ -109,17 +113,134 @@ El candidato y el estado inicial se ingresan una sola vez para todo el lote.
 
 ---
 
-## 8. Equivalencia con GeoMIP
+## 8. Optimización `marginal_valor` + Queyranne exacto para k=2 (2026-06-13)
 
-QNodes y GeoMIP dan el **mismo Φ** para todo k, porque ambos comparten ahora:
-cortes asimétricos, greedy top-down con pool de cortes, refinamiento 1-move
-futuro/presente, y métrica L1 = EMD Hamming exacta. Si vuelve a aparecer un
-"salto" entre k consecutivos, sospechar de cortes simétricos colándose.
+Dos cambios que hacen QNodes viable para N ≥ 20 (antes N=20 k=2 tardaba 392 s):
 
-> **Diferencia desde 2026-06-12:** **QNodes conserva la ILS** (Búsqueda Local Iterada),
-> mientras que **GeoMIP la retiró** (ver `GeoMIP/docs/decision_sin_ils.md`). Como la ILS
-> rara vez mejora el óptimo del 1-move, ambos siguen coincidiendo en Φ en la práctica;
-> GeoMIP es ahora determinista y algo más rápido.
+### 8.1 `NCube.marginal_valor` — evaluación O(2^(N-|mecanismo|))
+
+**Archivo:** `src/models/core/ncube.py` — campo `valor_memo`, método `marginal_valor`
+
+**Antes:** `_dist_bloque` llamaba `bipartir(futuros, presentes).distribucion_marginal()` →
+`marginalizar(V-pre)` → `np.mean(data, axis=ejes)` sobre el array COMPLETO de 2^N
+elementos → **O(2^N) por NCube**, independientemente del tamaño del mecanismo.
+
+**Ahora:** `marginal_valor(ejes, estado_inicial)` fija con indexación numpy las dims
+fuera del mecanismo al `estado_inicial`, luego promedia SOLO el sub-array de tamaño
+2^|ejes| → **O(2^(N-|mecanismo|))**. Matemáticamente equivalente por linealidad:
+`E_{V-pre}[data[pre=s0,•]] == marginalizar(V-pre)[s0]`.
+
+Speedup promedio: **2^(N/2)**. Para N=20, |mecanismo|≈10 → speedup ×1024 por llamada;
+total algoritmo **×145** medido (392 s → 2.7 s para k=2).
+
+Los resultados son ligeramente **mejores** (Φ más bajo) que antes porque `marginal_valor`
+devuelve `float64` vs `float32` de `distribucion_marginal` → mayor precisión numérica →
+el greedy toma caminos distintos y encuentra mínimos más bajos.
+
+### 8.2 Queyranne 1998 — k=2 exacto global con 2N átomos asimétricos
+
+**Archivo:** `src/strategies/q_nodes.py` — `_queyranne`, `_atomos_asimetricos`
+
+Para k=2 se usa el algoritmo de Queyranne (1998), que minimiza funciones submodulares
+simétricas exactamente en O(N²) evaluaciones vía ordenamiento de máxima adyacencia,
+pares colgantes y contracción. Los **2N átomos asimétricos** (N átomos `({i},∅)` para
+futuros + N átomos `(∅,{j})` para presentes) cubren el espacio **completo** de
+biparticiones asimétricas → garantía de mínimo global.
+
+Se eliminó la constante `_QUEYRANNE_N_MAX = 15` que antes restringía los átomos
+asimétricos a N ≤ 15 y usaba átomos simétricos ({i},{i}) para N > 15. Con
+`marginal_valor`, los 2N átomos son viables para todo N: las primeras fases de
+Queyranne trabajan sobre sub-arrays pequeños y el caché `valor_memo` amortiza el costo.
+
+---
+
+## 9. Convergencia con GeoMIP y sus límites
+
+Para N=10 y N=20, QNodes y GeoMIP dan el **mismo Φ** para todos los k. Para k=2, la
+coincidencia es garantizada por Queyranne (exacto). Para k≥3, es contingente: a N=22 la
+convergencia se rompe — GeoMIP encuentra mejores soluciones:
+
+| k | QNodes N=22 φ | GeoMIP N=22 φ | Ganador φ | Ganador velocidad |
+|---|--------------|--------------|----------|-----------------|
+| 2 | 0.499575 | 0.499575 | empate | **QNodes** (6.5s vs 31.9s) |
+| 3 | 0.999189 | **0.999150** | GeoMIP | **QNodes** (6.1s vs 11.9s) |
+| 4 | 1.498915 | **1.498764** | GeoMIP | **QNodes** (5.5s vs 10.7s) |
+| 5 | 1.998667 | **1.998490** | GeoMIP | **QNodes** (5.8s vs 12.5s) |
+
+QNodes es uniformemente **más rápido**, pero GeoMIP es **más preciso para k≥3 en N≥22**.
+Si vuelve a aparecer un "salto" entre k consecutivos en QNodes, sospechar de cortes
+simétricos colándose. La diferencia de Φ en N=22 no es un error: es la ventaja del
+clustering espectral de GeoMIP para explorar cortes geométricamente distintos.
+
+---
+
+## 10. Por qué la estrategia pura de QNodes es inviable para N ≥ 20
+
+El QNodes original (Queyranne 1998) fue diseñado para **bipartición** (k=2), donde es
+exacto y óptimo. Para k ≥ 3 no existe ningún algoritmo polinomial que garantice el
+óptimo global (el problema es NP-hard), por lo que **cualquier** implementación k≥3 es
+necesariamente heurística.
+
+El greedy top-down + ILS de QNodes funciona bien hasta N≈20, pero a N≥22 el espacio de
+k-particiones crece tanto que la ILS con sus pocos ciclos adaptativos no alcanza a
+explorar suficiente vecindario. GeoMIP, al añadir una matriz de afinidad geométrica y
+explorar cortes basados en similitud espectral de las columnas de la TPM, accede a zonas
+del espacio de búsqueda que el greedy asimétrico puro no visita.
+
+**En resumen:** para N ≥ 20 el enfoque de QNodes debe entenderse como
+- **exacto y preferido para k=2** (Queyranne garantiza el mínimo global),
+- **heurístico y competitivo para k=3-5 en N=20** (mismo Φ que GeoMIP),
+- **heurístico y subóptimo para k≥3 en N≥22** (GeoMIP lo supera en calidad).
+
+Para sistemas grandes con k≥3, QNodes ofrece velocidad; GeoMIP ofrece mejor Φ a costa
+de más tiempo de búsqueda y —sobre todo— un arranque más lento (ver `KGeoMIP/docs/`).
+
+---
+
+## 11. Precisión float64, solver exacto N≤6, `vacío=False` honrado y validación con fuerza bruta (2026-06-14)
+
+### 11.1 Precisión unificada en float64 (QNodes = KGeoMIP = fuerza bruta)
+
+`marginal_valor` calculaba la marginal del bloque en float64, pero `distribucion_marginal`
+(usada por la fuerza bruta y KGeoMIP) la redondeaba a **float32**. Misma partición,
+distinto redondeo → Φ diferían en **~1e-8** (y como cada motor es código aparte, el orden
+de reducción de `np.mean` divergía 1 ULP). **Arreglo:** `System.distribucion_marginal` y
+`QNodes._dist_bloque` ahora trabajan en **float64**. El vector de marginales es de tamaño
+N (no la tabla de costos), así que float64 **no cuesta memoria**. Los tres motores ahora
+coinciden a ~1e-15. (Antes se probó bajar QNodes a float32, pero subir todo a float64 es
+lo correcto: KGeoMIP no podía igualar a la bruta en float32 por ser implementaciones
+distintas.)
+
+### 11.2 Solver EXACTO para N ≤ 6
+
+Para N ≤ 6, `aplicar_estrategia` **enumera** el mismo espacio asimétrico que
+`BruteForceKMIP` (`_resolver_exacto`, reusa `_emd_bloques`) y devuelve el **óptimo global
+exacto**, honrando `permitir_presente_vacio`; si el espacio supera `_CAP_EXACTO` cae a la
+heurística. Garantiza QNodes == KGeoMIP == fuerza bruta en CSVs pequeños. Para N > 6 sigue
+el pipeline Queyranne + greedy + 1-move/2-move + ILS.
+
+### 11.3 `permitir_presente_vacio=False` ahora se honra en la heurística (N > 6)
+
+Antes, con `vacío=False` la heurística seguía generando bloques con mecanismo ∅ (Queyranne
+usaba átomos asimétricos que incluyen ∅, y el greedy/refinamiento no tenían guardas). Se
+implementó `_atomos_simetricos` (N átomos `({i},{i})`, usado cuando `vacío=False`), una
+guarda en `_queyranne._f` (inf si un bloque con futuro queda sin presente) y guardas de
+"presente no vacío" en `_mejor_split_bloques`, `_refinar_bloques`, `_refinar_bloques_2move`
+y `_perturbar_bloques`. Verificado N7: con `vacío=False` ningún bloque queda sin mecanismo.
+
+### 11.4 Default `permitir_presente_vacio` → `True`
+
+Cambiado de `False` a `True` para igualar a KGeoMIP y a `run_suite_2026` (la k-MIP "real"
+del proyecto permite ∅). Antes los dos motores exploraban espacios distintos por defecto.
+
+### 11.5 Validación con fuerza bruta: todas verdaderas
+
+`AYDA_2026_1/Brute_Force/comparar_fuerza_bruta.py` (solo N ≤ 6, lee `Brute_Force/samples_force/`,
+**no** toca `samples_binary`) cruza BruteForce vs KQNodes vs KGeoMIP. Tras 11.1–11.2,
+**todas las pruebas salen VERDADERO** (`Φ_igual = TRUE`, cota `QN_≥_BF = TRUE`) en todo
+N≤6 y todo k, deterministas y no-deterministas. El `err_rel` residual ~5e-8 de XLSX viejos
+era el float32 pre-arreglo; regenerado en float64 cae a ~0. Las **TPM no-deterministas no
+fallan**: la métrica L1 y `np.mean`/`marginal_valor` son float-safe.
 
 ---
 
@@ -131,7 +252,7 @@ futuro/presente, y métrica L1 = EMD Hamming exacta. Si vuelve a aparecer un
 candidatos de aislamiento. En esa etapa la métrica seleccionaba entre EMD-Hamming
 (`pyemd`, N ≤ 12) y L1 (N > 12), y el motor era aglomerativo bottom-up.
 
-**2026-06-10 (tarde) — Reescritura al motor asimétrico unificado (estado vigente).**
+**2026-06-10 (tarde) — Reescritura al motor asimétrico unificado.**
 Se descubrió que la L1 marginal es la EMD-Hamming exacta (no aproximación), lo que
 permitió eliminar `pyemd` y el límite N ≤ 12. Se reemplazó el motor aglomerativo por el
 greedy top-down sobre bloques asimétricos `(futuros, presentes)`, con refinamiento
@@ -141,9 +262,21 @@ greedy top-down sobre bloques asimétricos `(futuros, presentes)`, con refinamie
 `self._permitir_presente_vacio` pero **nunca se leía**: el corte de mecanismo vacío
 `({i}, ∅)` (familia 3 del pool) se añadía siempre, así que el mecanismo ∅ aparecía aun
 cuando se pedía `False`. Ahora la familia 3 se genera **solo si el flag es `True`**.
-(QNodes ya garantizaba, vía `if not eff: return` en `_add` y las guardas de no vaciar el
-futuro en split/1-move/perturbación, que **nunca** se produce una parte `(∅, ∅)`; ese
-mismo bug sí existía en GeoMIP y se corrigió por separado.)
+
+**2026-06-13 — `marginal_valor` + Queyranne exacto para k=2.**
+- `NCube.marginal_valor(ejes, estado_inicial)` reemplaza la ruta `bipartir→marginalizar`
+  en `_dist_bloque`: coste O(2^(N-|mecanismo|)) vs O(2^N) anterior. Speedup ×145 en N=20
+  (392 s → 2.7 s). Resultados float64 vs float32 → Φ ligeramente más bajo.
+- Queyranne 1998 con 2N átomos asimétricos garantiza óptimo global para k=2 en todo N.
+  Se eliminó el umbral `_QUEYRANNE_N_MAX = 15` que antes forzaba átomos simétricos en N > 15.
+- Descubierto que para k ≥ 3 en N ≥ 22, GeoMIP encuentra Φ menor: la ILS adaptativa de
+  QNodes no cubre suficiente vecindario a esos tamaños (ver §9 y §10).
+
+**2026-06-14 — Precisión float64, exacto N≤6, `vacío=False` honrado, validación BF (estado vigente).**
+Ver §11. Resumen: vector de marginales a float64 (QNodes=KGeoMIP=fuerza bruta a ~1e-15);
+solver exacto para N≤6; `permitir_presente_vacio=False` ahora respetado en la heurística
+(átomos simétricos + guardas); default del flag → `True`; todas las pruebas vs fuerza
+bruta (N≤6, det y no-det) salen VERDADERO. TPM no-deterministas verificadas (no fallan).
 
 ---
 

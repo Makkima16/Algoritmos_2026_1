@@ -40,12 +40,21 @@ function ResultadoPanel({ titulo, compacto }) {
   const [detalle, setDetalle] = useState(null);
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState(null);
+  const [fEstado, setFEstado] = useState("");
+  const [fCandidato, setFCandidato] = useState("");
 
   useEffect(() => {
     setSel(null);
     setDetalle(null);
     api.results(algo, tipo).then((r) => setLista(r.resultados)).catch((e) => setError(String(e)));
   }, [algo, tipo]);
+
+  // Filtra el listado por estado inicial y candidato (coincidencia por substring).
+  const listaFiltrada = lista.filter(
+    (it) =>
+      (!fEstado || (it.estado || "").includes(fEstado)) &&
+      (!fCandidato || (it.candidato || "").includes(fCandidato))
+  );
 
   async function abrir(item) {
     setSel(item.ruta);
@@ -81,9 +90,25 @@ function ResultadoPanel({ titulo, compacto }) {
             </select>
           </div>
         </div>
-        <div className="scroll" style={{ marginTop: 10, maxHeight: 200 }}>
-          {lista.length === 0 && <p className="muted">Sin resultados.</p>}
-          {lista.map((it) => (
+        <div className="row" style={{ marginTop: 10 }}>
+          <div className="col">
+            <label>Filtrar por estado inicial</label>
+            <input className="mono" value={fEstado} placeholder="p.ej. 1111…"
+                   onChange={(e) => setFEstado(e.target.value.trim())} />
+          </div>
+          <div className="col">
+            <label>Filtrar por candidato</label>
+            <input className="mono" value={fCandidato} placeholder="p.ej. 1111…"
+                   onChange={(e) => setFCandidato(e.target.value.trim())} />
+          </div>
+        </div>
+        <div className="scroll" style={{ marginTop: 10, maxHeight: 220 }}>
+          {listaFiltrada.length === 0 && (
+            <p className="muted">
+              {lista.length === 0 ? "Sin resultados." : "Ningún resultado coincide con el filtro."}
+            </p>
+          )}
+          {listaFiltrada.map((it) => (
             <div
               key={it.ruta}
               className={`list-item ${sel === it.ruta ? "active" : ""}`}
@@ -91,6 +116,13 @@ function ResultadoPanel({ titulo, compacto }) {
             >
               {it.archivo}
               {it.subcarpeta && <div className="tag">{it.subcarpeta}</div>}
+              {(it.estado || it.candidato) && (
+                <div className="muted mono" style={{ fontSize: 11, marginTop: 2 }}>
+                  {it.estado ? `estado ${it.estado}` : ""}
+                  {it.estado && it.candidato ? " · " : ""}
+                  {it.candidato ? `cand ${it.candidato}` : ""}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -112,7 +144,8 @@ function DetalleManual({ detalle }) {
       <div className="card">
         <h3 style={{ marginTop: 0 }}>{d.estrategia || "Resultado"}</h3>
         <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>
-          dataset {d.dataset} · estado {d.estado_inicial} · alcance {d.alcance} · mecanismo {d.mecanismo}
+          dataset {d.dataset} · estado {d.estado_inicial} · candidato {d.sistema_candidato}
+          {" "}· alcance {d.alcance} · mecanismo {d.mecanismo}
         </div>
         <div className="particion">{d.particion}</div>
       </div>
@@ -137,9 +170,15 @@ function DetalleManual({ detalle }) {
 }
 
 function DetalleBloque({ data }) {
+  const meta = data.meta || {};
   return (
     <div className="card">
       <h4 style={{ marginTop: 0 }}>Lote (XLSX)</h4>
+      {(meta.estado || meta.candidato) && (
+        <div className="muted mono" style={{ fontSize: 13, marginBottom: 8 }}>
+          estado inicial {meta.estado || "—"} · candidato {meta.candidato || "—"}
+        </div>
+      )}
       <div className="scroll">
         <table>
           <thead>

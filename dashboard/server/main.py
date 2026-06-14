@@ -115,6 +115,13 @@ def run(req: RunReq):
         resp["perdida_phi"],
         resp["particion"],
     )
+    # Persistir la corrida manual como JSON en results/<manual|manually>/ del motor
+    # (igual que la terminal), para que aparezca luego en "Resultados" y "Análisis".
+    try:
+        resp["guardado_en"] = R.guardar_resultado_manual(req.algo, req.model_dump(), resp)
+    except Exception as e:  # noqa: BLE001
+        resp["guardado_en"] = None
+        resp["guardado_error"] = str(e)
     return resp
 
 
@@ -233,7 +240,10 @@ def block(req: BlockReq):
 
         tiempo_total = time.time() - t0
         try:
-            escribir_xlsx_bloque(ruta_salida, resultados, tiempo_total, tiempo_warmup_acum)
+            escribir_xlsx_bloque(
+                ruta_salida, resultados, tiempo_total, tiempo_warmup_acum,
+                estado=req.estado, candidato=req.candidato,
+            )
         except Exception as e:  # noqa: BLE001
             yield _evento("error", {"mensaje": f"No se pudo escribir el XLSX: {e}"})
 
