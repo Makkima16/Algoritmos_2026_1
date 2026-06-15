@@ -94,7 +94,10 @@ PLAN_N = {
 }
 
 # k → motor → (col_particion, col_perdida, col_tiempo)
+# k=2 (BIPARTICIONES) ocupa las cols 4-9; sus datos se diligenciaron a mano y por
+# defecto la suite NO lo recorre (--solo-k 3,4,5), pero las gráficas sí lo leen.
 COLS = {
+    2: {"qnodes": (4, 5, 6), "geomip": (7, 8, 9)},
     3: {"qnodes": (10, 11, 12), "geomip": (13, 14, 15)},
     4: {"qnodes": (16, 17, 18), "geomip": (19, 20, 21)},
     5: {"qnodes": (22, 23, 24), "geomip": (25, 26, 27)},
