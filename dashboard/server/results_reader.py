@@ -68,6 +68,11 @@ def guardar_resultado_manual(algo: str, req: dict, resp: dict) -> str:
 
     tiempo_total = float(resp.get("tiempo_total_segundos", 0.0))
     tiempo_prep = float(resp.get("tiempo_preparacion_segundos", 0.0))
+    # tiempo_total_segundos ya viene normalizado (preparación + búsqueda) para ambos
+    # motores; la búsqueda pura es el campo emitido o, como respaldo, total - prep.
+    tiempo_busqueda = float(
+        resp.get("tiempo_busqueda_segundos", max(0.0, tiempo_total - tiempo_prep))
+    )
 
     res_data = {
         "dataset": Path(req["ruta_tpm"]).name,
@@ -89,9 +94,7 @@ def guardar_resultado_manual(algo: str, req: dict, resp: dict) -> str:
     res_data["distribucion_subsistema"] = resp.get("distribucion_subsistema")
     res_data["distribucion_particion"] = resp.get("distribucion_particion")
     res_data["particion"] = resp.get("particion", "")
-    res_data["tiempo_busqueda_segundos"] = (
-        tiempo_total if algo == "qnodes" else tiempo_total - tiempo_prep
-    )
+    res_data["tiempo_busqueda_segundos"] = tiempo_busqueda
     res_data["tiempo_preparacion_segundos"] = tiempo_prep
     res_data["tiempo_total_segundos"] = tiempo_total
     res_data["tiempo_formateado"] = _formatear_tiempo(tiempo_total)

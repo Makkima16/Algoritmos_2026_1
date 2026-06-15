@@ -27,6 +27,7 @@ from pathlib import Path
 from datetime import datetime
 
 import numpy as np
+import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
@@ -71,6 +72,27 @@ def formatear_tiempo(segundos: float) -> str:
 
 
 # ── Helpers de entrada ─────────────────────────────────────────────────────
+
+def _cargar_tpm(ruta: Path) -> np.ndarray:
+    """
+    Carga una TPM desde CSV a un ndarray float64.
+
+    Usa pandas.read_csv (parser en C, por chunks) en vez de np.genfromtxt: para
+    TPMs grandes (N≥20, millones de filas) genfromtxt construye listas Python
+    intermedias con un pico de memoria de 30–50 GB que agota la RAM y "cuelga"
+    el proceso. read_csv evita ese pico y es ~100× más rápido.
+
+    Precisión INTACTA: dtype=float64 (igual que antes) y float_precision="round_trip"
+    fuerza un parseo decimal→float64 correctamente redondeado, bit-idéntico al de
+    genfromtxt. Así QNodes/KGeoMIP/fuerza bruta siguen coincidiendo a ~1e-15.
+    """
+    return pd.read_csv(
+        ruta,
+        header=None,
+        dtype=np.float64,
+        float_precision="round_trip",
+    ).to_numpy()
+
 
 def _seleccionar_tpm() -> tuple:
     """Pide N y tipo (binaria/no binaria) en terminal, lista los archivos que coincidan y deja elegir.
@@ -118,7 +140,7 @@ def _seleccionar_tpm() -> tuple:
             if sel.isdigit() and 1 <= int(sel) <= len(archivos):
                 ruta = archivos[int(sel) - 1]
                 try:
-                    tpm     = np.genfromtxt(ruta, delimiter=',')
+                    tpm     = _cargar_tpm(ruta)
                     n_nodos = tpm.shape[1]
                 except Exception as e:
                     print(f" Error al leer la TPM: {e}")
@@ -696,9 +718,11 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
     resultados = []
     total = len(pruebas)
     tiempo_inicio_lote = time.time()
-    # Acumulado del tiempo de "calentar motores" (preparación del subsistema),
-    # aparte del tiempo de las pruebas. Tras la primera prueba las cachés de
-    # condicionado hacen que las siguientes preparaciones sean casi nulas.
+    # En KQNodes NO hay fase de calentamiento separada ni cachés de subsistema:
+    # cada prueba reconstruye su System/condicionar/substraer, y ese costo de
+    # preparación se incluye ahora en el tiempo de CADA prueba (no aparte). La fila
+    # "Arranque motor" queda en 0 (se conserva por paridad de layout con KGeoMIP y
+    # el dashboard).
     tiempo_warmup_acum = 0.0
 
     for idx, row in enumerate(pruebas, start=1):
@@ -764,9 +788,15 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
                 k=k_val_global,
                 permitir_presente_vacio=permitir_vacio,
             )
-            tiempo_seg = float(solucion.tiempo_ejecucion)
-            tiempo_fmt = formatear_tiempo(tiempo_seg)
-            tiempo_warmup_acum += float(getattr(solucion, "tiempo_preparacion", 0.0))
+            # tiempo_ejecucion es SOLO la búsqueda (sia_tiempo_inicio se fija tras
+            # preparar). Se le suma la preparación de ESTA prueba: en KQNodes no hay
+            # caché de subsistema, así que cada prueba reconstruye System + condicionar
+            # + substraer (trabajo específico por prueba). La fila refleja así el costo
+            # real de pared de la prueba, no solo su búsqueda.
+            tiempo_busqueda = float(solucion.tiempo_ejecucion)
+            tiempo_prep     = float(getattr(solucion, "tiempo_preparacion", 0.0))
+            tiempo_seg      = tiempo_busqueda + tiempo_prep
+            tiempo_fmt      = formatear_tiempo(tiempo_seg)
 
             print(f"  ✓  {tiempo_fmt}")
 
@@ -783,7 +813,8 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
             resultados.append(_fila)
             _actualizar_fila_excel(ruta_salida, orig_idx + 2, _fila)
             _actualizar_tiempo_total_excel(ruta_salida, fila_total, time.time() - tiempo_inicio_lote)
-            _actualizar_warmup_excel(ruta_salida, fila_warm, tiempo_warmup_acum)
+            # KQNodes no tiene warmup separado; la prep va incluida en el tiempo de
+            # la prueba. La fila "Arranque motor" se escribe (en 0) al final del lote.
 
         except Exception as e:
             msg = str(e)

@@ -246,7 +246,7 @@ export default function Ejecutar() {
             <strong>Progreso {progreso.idx}/{progreso.total}</strong>
             {resumen && (
               <span className="muted">
-                ✓ {resumen.exitosas} ok · {resumen.con_error} error · búsqueda {resumen.tiempo_busqueda_fmt} · arranque {resumen.tiempo_arranque_fmt}
+                ✓ {resumen.exitosas} ok · {resumen.con_error} error · pruebas {resumen.tiempo_pruebas_fmt} · arranque {resumen.tiempo_arranque_fmt}
               </span>
             )}
           </div>
@@ -313,8 +313,8 @@ function BloqueMetricas({ r }) {
           <div className="l">Pruebas por banda (baja / media / alta)</div>
         </div>
         <div className="metric">
-          <div className="v">{r.tiempo_busqueda_fmt}</div>
-          <div className="l">Tiempo de búsqueda (Σ pruebas)</div>
+          <div className="v">{r.tiempo_pruebas_fmt}</div>
+          <div className="l">Tiempo de pruebas (Σ prep+búsqueda)</div>
         </div>
         <div className="metric">
           <div className="v">{r.tiempo_promedio_fmt}</div>

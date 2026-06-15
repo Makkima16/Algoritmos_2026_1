@@ -53,14 +53,29 @@ def _serializar_solucion(sol) -> dict:
     def _lista(x):
         return x.tolist() if hasattr(x, "tolist") else x
 
+    # Normalización de tiempos (clave para que ambos motores reporten lo mismo):
+    # sol.tiempo_ejecucion significa cosas distintas por motor — en KGeoMIP ya incluye
+    # la preparación (prep + búsqueda); en KQNodes es solo la búsqueda. Aquí se emiten
+    # campos SIN ambigüedad y CONSISTENTES para los dos:
+    #   tiempo_busqueda_segundos = solo búsqueda
+    #   tiempo_total_segundos    = preparación + búsqueda (costo real por prueba)
+    t_ejec = float(getattr(sol, "tiempo_ejecucion", 0.0))
+    t_prep = float(getattr(sol, "tiempo_preparacion", 0.0))
+    if ALGO == "geomip":
+        t_busqueda = max(0.0, t_ejec - t_prep)   # tiempo_ejecucion ya incluye prep
+        t_total = t_ejec
+    else:
+        t_busqueda = t_ejec                       # tiempo_ejecucion = solo búsqueda
+        t_total = t_ejec + t_prep
     return {
         "estrategia": getattr(sol, "estrategia", ALGO),
         "perdida_phi": float(sol.perdida),
         "distribucion_subsistema": _lista(sol.distribucion_subsistema),
         "distribucion_particion": _lista(sol.distribucion_particion),
         "particion": str(sol.particion),
-        "tiempo_total_segundos": float(getattr(sol, "tiempo_ejecucion", 0.0)),
-        "tiempo_preparacion_segundos": float(getattr(sol, "tiempo_preparacion", 0.0)),
+        "tiempo_busqueda_segundos": t_busqueda,
+        "tiempo_preparacion_segundos": t_prep,
+        "tiempo_total_segundos": t_total,
     }
 
 

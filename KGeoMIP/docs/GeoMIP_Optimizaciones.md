@@ -127,8 +127,17 @@ Optimizaciones concretas:
 - Complejidad O(n_dims · 2^n_dims) en tiempo, O(2^n_dims · n) en espacio, en vez de
   un cálculo recursivo por par de estados.
 
-La misma tabla alimenta la matriz de afinidad geométrica y el pool de cortes, así que
-su costo se amortiza.
+La tabla alimenta el pool de cortes geométricos (`_construir_cut_pool`, el mejor
+representante por cáscara de Hamming). Su costo se amortiza entre todos los k del lote,
+que reutilizan la misma tabla.
+
+> **Cambio (2026-06-14):** la tabla **ya NO** se usa para construir una matriz de
+> afinidad geométrica. Antes, `_construir_tabla_costos` terminaba llamando a
+> `_construir_matriz_afinidad`, que recorría las `2^n_dims × n` celdas **dos veces en
+> float64** (`astype(float64)` + división por normas) para producir una matriz N×N que
+> **ningún camino de producción consumía** (solo la usaba `_evaluar_k_completo`, el
+> camino espectral antiguo sin uso). Era CPU desperdiciado en **cada** corrida y para
+> **todo N**, y el pico de RAM dominante en N grande (ver §11). Se eliminó la llamada.
 
 ---
 
@@ -278,8 +287,12 @@ domina el tiempo de GeoMIP —sobre todo en N ≥ 20— es el **arranque del mot
 | LazyTPM: lectura chunks del CSV | O(2^N × N / chunk) | ~0.5 s |
 | Condicionamiento del subsistema (NCubos) | O(N × 2^N) | ~2 s |
 | `_construir_tabla_costos` (BFS Hamming) | O(N × 2^N) | ~5 s |
-| Matriz de afinidad geométrica | O(N² × 2^N) / joblib | ~20 s |
+| ~~Matriz de afinidad geométrica~~ | ~~O(N² × 2^N) / joblib~~ | ~~~20 s~~ **eliminada (2026-06-14)** |
 | `_construir_cut_pool` (pool geométrico) | O(N²) | <1 s |
+
+> **Cambio (2026-06-14):** la matriz de afinidad era el paso **más caro** del arranque
+> (~20 s en N=22) y se construía sin que nada la consumiera. Al eliminarla (§11), el
+> arranque cae a ~7.5 s en N=22 y deja de ser, con diferencia, el cuello de botella.
 
 El primer k llamado paga todo esto. Los k siguientes reutilizan el subsistema
 (cacheado en Manager) y la tabla, por lo que son sensiblemente más rápidos.
@@ -289,16 +302,30 @@ En N=20: k=2 tardó **6.2 s** (arranque incluido) vs k=3: **2.7 s**.
 
 ### Modo manual
 
-Cada problema en modo manual paga el arranque completo (subsistema + tabla + afinidad).
+Cada problema en modo manual paga el arranque completo (subsistema + tabla de costos).
 Cambiar candidato o estado invalida el caché. El tiempo reportado es arranque + búsqueda.
 
 ### Modo por bloque
 
-El modo batch ordena las pruebas de menor a mayor complejidad, cachea el subsistema
-para todo el lote, y ejecuta una corrida de **calentamiento descartable** (warmup) antes
-de la primera prueba. El warmup paga el arranque; las pruebas del lote registran solo
-su búsqueda. El arranque se reporta aparte como "Arranque del motor (warmup)" en el
-XLSX / SSE del dashboard. En la comparación del dashboard, empate de Φ → **"Ambos"**.
+El modo batch ordena las pruebas de menor a mayor complejidad, cachea el **candidato**
+condicionado para todo el lote (un solo `condicionar`, lo más caro y común a todas las
+pruebas), y ejecuta una corrida de **calentamiento descartable** (warmup) antes de la
+primera prueba. La fila **"Arranque del motor (warmup)"** contabiliza solo ese arranque
+**único** (Numba JIT + pool de hilos + condicionado del candidato).
+
+> **Cambio (2026-06-14):** antes, la **preparación por prueba** (el `substraer` que
+> construye el subsistema de cada prueba — depende de su alcance/mecanismo, que cambian
+> por fila y por eso NO se cachean) se sumaba al "Arranque motor", y la fila de la prueba
+> mostraba **solo su búsqueda**. Esto hacía que cada prueba pareciera más barata que su
+> tiempo real de pared y que el "Arranque motor" creciera con cada prueba. Ahora esa
+> preparación por prueba se **incluye en el tiempo de la prueba** (preparación + búsqueda),
+> y el "Arranque motor" queda como costo único. El **tiempo total del lote no cambia**;
+> solo se reparte de forma honesta. *(KQNodes tenía el mismo reparto y se corrigió igual;
+> además no cachea nada, así que cada prueba reconstruye su subsistema completo — su fila
+> "Arranque motor" queda en 0 porque no hay fase de calentamiento separada.)*
+
+El arranque se reporta aparte como "Arranque del motor (warmup)" en el XLSX / SSE del
+dashboard. En la comparación del dashboard, empate de Φ → **"Ambos"**.
 
 **Implicación:** en lotes grandes el arranque se amortiza y GeoMIP es competitivo
 en tiempo total. Para pruebas sueltas o k=2, QNodes (sin arranque costoso, exacto para
@@ -317,13 +344,15 @@ k=2 vía Queyranne) es preferible.
 | 4 | **1.498764** | 10.7 s | 1.498915 | **5.5 s** | **GeoMIP** | QNodes ×2.0 |
 | 5 | **1.998490** | 12.5 s | 1.998667 | **5.8 s** | **GeoMIP** | QNodes ×2.2 |
 
-**Por qué GeoMIP es mejor en Φ para k≥3:** el pool de cortes geométricos (familia 3,
-derivada de la afinidad espectral de las columnas de la TPM) expone particiones que el
-greedy asimétrico puro no genera. A N≤20 ambos coinciden; a N≥22 la exploración
-geométrica empieza a dominar.
+**Por qué GeoMIP es mejor en Φ para k≥3:** el pool de cortes geométricos (familia
+derivada de `tabla_T` — el mejor representante por cáscara de Hamming en
+`_construir_cut_pool`) expone particiones que el greedy asimétrico puro no genera. A
+N≤20 ambos coinciden; a N≥22 la exploración geométrica empieza a dominar. *Nota: esta
+ventaja proviene de la tabla de costos, NO de la matriz de afinidad eliminada en 2026-06-14
+(que alimentaba el camino espectral sin uso); por eso quitarla no cuesta calidad.*
 
-**Por qué QNodes es siempre más rápido:** no construye tabla de costos ni matriz de
-afinidad; `marginal_valor` (desde 2026-06-13) reduce cada evaluación de bloque a
+**Por qué QNodes es siempre más rápido:** no construye tabla de costos (KGeoMIP sí, aunque
+desde 2026-06-14 ya no la matriz de afinidad); `marginal_valor` (desde 2026-06-13) reduce cada evaluación de bloque a
 O(2^(N/2)) en vez de O(2^N). Para k=2, el algoritmo de Queyranne garantiza además el
 óptimo global exacto en O(N²) evaluaciones, algo que GeoMIP (heurístico) no puede.
 
@@ -331,6 +360,68 @@ O(2^(N/2)) en vez de O(2^N). Para k=2, el algoritmo de Queyranne garantiza adem�
 - **k=2, cualquier N:** QNodes — exacto y ~4–5× más rápido.
 - **k≥3, N≤20:** ambos equivalentes en Φ; QNodes más rápido.
 - **k≥3, N≥22:** GeoMIP — mejor Φ; QNodes — mejor velocidad.
+
+---
+
+## 11. ⭐ Reducción de RAM pico (2026-06-14): afinidad muerta + copia única de `prob`
+
+**Archivo:** `src/controllers/strategies/kgeomip.py` — `_construir_tabla_costos`
+
+Dos cambios que **bajan el pico de RAM** sin tocar Φ, habilitando N grande (N25 completo)
+en máquinas modestas. Para N=25 completo, `2^25 ≈ 33.5 M` filas × 25 cols × 4 B (float32) =
+**~3.35 GB por cada arreglo `(2^n_dims, n)`**; el problema era cuántos coexistían.
+
+### 11.1 Eliminar la matriz de afinidad (gana ~13 GB y CPU en TODO N)
+
+`_construir_tabla_costos` llamaba `_construir_matriz_afinidad()` al final, que hacía
+`C = tabla_T.astype(np.float64)` (+6.7 GB) y `C_norm = C / norms` (+6.7 GB) para producir
+una matriz N×N que **nadie lee**: `_evaluar_k_completo` / `_particion_grafo_hipercubo`
+(camino espectral) no se invocan desde `aplicar_estrategia`. Era doble pasada en float64 en
+**cada** corrida (CPU desperdiciado para todo N) y el pico de RAM dominante en N grande.
+Se eliminó la llamada. No cambia Φ (verificado: rutas Numba y numpy dan el mismo Φ).
+
+### 11.2 Construir `prob_T` directo, sin duplicar (gana ~3.35 GB)
+
+La ruta Numba creaba `prob` (n×2^d) y luego `prob_T = ascontiguousarray(prob.T)` (2^d×n):
+**dos copias de los mismos datos** a la vez. Ahora `prob_T` se llena columna a columna
+directamente desde los n-cubos y `prob` no se construye (solo existe en la ruta numpy sin
+Numba, que sí opera por bloques de columnas). Una copia en vez de dos; mismos valores, mismo Φ.
+
+### Presupuesto de RAM pico (N=25 completo)
+
+| Etapa | Antes | Después |
+|---|---|---|
+| Cubos del subsistema (piso inevitable) | ~3.35 GB | ~3.35 GB |
+| `prob` + `prob_T` (doble copia) | ~6.7 GB | **~3.35 GB** (solo `prob_T`) |
+| `tabla_T` | ~3.35 GB | ~3.35 GB |
+| Matriz de afinidad (`astype(f64)` + división) | **~13.4 GB** | **0** (eliminada) |
+| **Pico aproximado** | **~20 GB** | **~7 GB** |
+
+Con esto N25 entra en RAM. El piso real (~3.35 GB de cubos del subsistema) sigue ahí porque
+las marginales necesitan los n-cubos completos; un futuro "modo bajo memoria" que omita
+`tabla_T` para N ≥ umbral (usando solo aislamiento + complemento + greedy + 1-move, que no
+requieren la tabla) bajaría el pico a ese piso.
+
+### 11.3 Cachés acotados: fin de la fuga de RAM entre pruebas (2026-06-14)
+
+**Archivo:** `src/models/base/sia.py` — `_CANDIDATO_CACHE`, `_SUBSISTEMA_CACHE`, `_acotar_cache`
+
+`sia_preparar_subsistema` cachea el candidato condicionado y el subsistema. La clave del
+**subsistema incluye alcance y mecanismo**, que cambian en cada prueba de un lote → su clave
+es única y **nunca se reutiliza**. Como el caché no tenía límite, acumulaba **un subsistema
+(con sus NCubos, enormes en N grande) por prueba**, y en el worker persistente del dashboard
+a lo largo de TODOS los lotes. La RAM crecía prueba a prueba → el SO **paginaba a disco** →
+las pruebas siguientes (incluso una idéntica) se volvían **progresivamente más lentas**.
+
+Ahora ambos cachés se **acotan por inserción** (FIFO) a unas pocas entradas
+(`_CANDIDATO_CACHE_MAX`, `_SUBSISTEMA_CACHE_MAX = 2`): el candidato es común a todo el lote
+(basta 1, evita reconstruir el `System` completo O(N·2^N) por prueba) y el subsistema solo
+se reutilizaría si se repite EXACTAMENTE la misma prueba (caso raro). El reuso legítimo del
+subsistema entre los k de UNA misma llamada no se ve afectado (usa `self.sia_subsistema`, no
+el caché). Esto elimina la degradación progresiva del modo bloque / dashboard sin tocar Φ.
+
+> KQNodes no tiene estos cachés (reconstruye su subsistema por prueba), así que nunca sufrió
+> esta fuga; el cambio es exclusivo de KGeoMIP.
 
 ---
 
@@ -346,6 +437,8 @@ O(2^(N/2)) en vez de O(2^N). Para k=2, el algoritmo de Queyranne garantiza adem�
 | Refinamiento presente 1-move (asimétrico) | Vecindario asimétrico; baja Φ | ⭐ | ⭐⭐ |
 | Retiro de ILS (2026-06-12) | Menos ~5× del refinamiento; determinista | ⭐⭐ | — (Φ equivalente) |
 | Desactivar VNS 2-move (2026-06-14) | Quita el término O(M²); 3–4× la búsqueda | ⭐⭐ | — (Φ idéntico) |
+| **Eliminar matriz de afinidad (2026-06-14)** | Quita ~20 s de arranque y ~13 GB de RAM, en TODO N | ⭐⭐⭐ | — (Φ idéntico) |
+| **`prob_T` sin doble copia (2026-06-14)** | −~3.35 GB de RAM pico en N25 | ⭐ | — (Φ idéntico) |
 | LazyTPM (N ≥ 18) | Evita Out-of-Memory | — | — (habilita N grande) |
 
 Las dos primeras filas son las que hacen a GeoMIP simultáneamente más rápido **y** más

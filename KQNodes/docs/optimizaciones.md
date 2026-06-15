@@ -232,6 +232,16 @@ ahora lo que se cachea ya es el resultado de una evaluación O(2^(N/2)) en lugar
 > **aparte** como "arranque del motor"; así cada prueba guarda solo su tiempo de búsqueda.
 > En la comparación por bloque del dashboard, un empate de Φ entre KQNodes y KGeoMIP se
 > marca como **"Ambos"**.
+>
+> **Cambio en `exec.py` standalone (2026-06-14).** En el CLI por bloque (no el dashboard),
+> `tiempo_ejecucion` es solo la búsqueda (`sia_tiempo_inicio` se fija tras preparar). Antes
+> la preparación por prueba se sumaba a "Arranque motor" y la fila mostraba solo la
+> búsqueda. Como **KQNodes no cachea el subsistema** (cada prueba reconstruye `System` +
+> `condicionar` + `substraer`, §nota: no hay `_CANDIDATO_CACHE`), esa preparación es real y
+> específica por prueba: ahora se **incluye en el tiempo de cada prueba** (preparación +
+> búsqueda). La fila "Arranque motor" queda en **0** (KQNodes no tiene fase de calentamiento
+> separada). El tiempo total del lote no cambia. Mismo criterio aplicado en KGeoMIP — ver
+> `KGeoMIP/docs/GeoMIP_Optimizaciones.md` §9.
 
 ---
 
@@ -366,3 +376,13 @@ casualidad, pero no hay garantía futura.
 
 Para k=2, QNodes garantiza el mínimo global (Queyranne). Para k≥3 en N≥22, GeoMIP
 encuentra Φ menores a costa de más tiempo; QNodes conserva la ventaja de velocidad.
+
+> **Nota comparativa (2026-06-14):** parte de la ventaja de velocidad de QNodes era que
+> KGeoMIP construía, en su arranque, una **matriz de afinidad** sobre la tabla de costos
+> `2^n_dims × n` (la conversión a float64 dominaba ~20 s en N=22 y ~13 GB de RAM en N=25).
+> Esa matriz era **código muerto** (la consumía solo el camino espectral sin uso) y se
+> eliminó del lado KGeoMIP. Esto **acerca el arranque de KGeoMIP al de QNodes** (que nunca
+> construyó tabla de costos ni afinidad — ver §8 `marginal_valor`), pero no cambia los Φ ni
+> el hecho de que QNodes evalúa cada bloque en O(2^(N/2)). La ventaja de velocidad de QNodes
+> persiste; lo que baja es el sobrecosto de arranque de KGeoMIP. Detalle en
+> `KGeoMIP/docs/GeoMIP_Optimizaciones.md` §11.

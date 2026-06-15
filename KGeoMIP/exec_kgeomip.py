@@ -947,14 +947,17 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
             tiempo_seg   = float(getattr(solucion, "tiempo_ejecucion",
                                          getattr(solucion, "tiempo_total", 0.0)))
             tiempo_prep  = float(getattr(solucion, "tiempo_preparacion", 0.0))
-            # En KGeoMIP tiempo_ejecucion incluye la preparación; el dato de la
-            # prueba es sólo la búsqueda, y la preparación se suma al warmup.
-            tiempo_busqueda = max(0.0, tiempo_seg - tiempo_prep)
-            tiempo_warmup_acum += tiempo_prep
+            # El tiempo de la prueba INCLUYE la preparación de SU subsistema
+            # (substraer con el alcance/mecanismo de esta prueba): es trabajo
+            # específico por prueba, dependiente de sus parámetros, no calentamiento
+            # único. tiempo_seg ya es preparación + búsqueda. El "Arranque motor"
+            # queda SOLO con el warmup único (Numba JIT + pool de hilos + condicionar
+            # el candidato, que está cacheado y se paga una sola vez).
+            tiempo_test  = tiempo_seg
             estrateg_str = getattr(solucion, "estrategia", "kgeomip")
             match_k      = re.search(r'K=(\d+)', estrateg_str)
             k_optima     = int(match_k.group(1)) if match_k else None
-            tiempo_fmt   = formatear_tiempo(tiempo_busqueda)
+            tiempo_fmt   = formatear_tiempo(tiempo_test)
 
             print(f"  ✓  {tiempo_fmt}")
 
@@ -973,7 +976,9 @@ def modo_bloque(ruta_tpm: Path, tpm: np.ndarray, n_nodos: int):
             resultados.append(_fila)
             _actualizar_fila_excel(ruta_salida, orig_idx + 2, _fila)
             _actualizar_tiempo_total_excel(ruta_salida, fila_total, time.time() - tiempo_inicio_lote)
-            _actualizar_warmup_excel(ruta_salida, fila_warm, tiempo_warmup_acum)
+            # El warmup (arranque único) ya no cambia por prueba; se escribió antes
+            # del bucle y se reescribe al final. La preparación por prueba ahora va
+            # incluida en el tiempo de la prueba, no en el warmup.
 
         except Exception as e:
             _restaurar_consola()

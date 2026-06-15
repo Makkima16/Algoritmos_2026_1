@@ -50,8 +50,10 @@ def escribir_xlsx_bloque(
     filas: lista en orden original con claves
         {num, alcance, mecanismo, particion, perdida, tiempo_fmt, error}
     tiempo_total: wall-clock del lote completo.
-    tiempo_arranque: acumulado de preparación del subsistema (warmup), aparte del
-        tiempo de búsqueda; se reporta en su propia fila como en exec.py.
+    tiempo_arranque: tiempo del calentamiento DESCARTABLE único (warmup) hecho antes
+        del lote; NO incluye la preparación por prueba (esa va en el tiempo de cada
+        prueba). Se reporta en su propia fila. El tiempo por fila (tiempo_fmt) ya es
+        preparación + búsqueda de esa prueba.
     estado:    estado inicial del lote (cadena binaria), guardado en celda aparte.
     candidato: sistema candidato del lote (cadena binaria), guardado en celda aparte.
     """
@@ -107,8 +109,8 @@ def escribir_xlsx_bloque(
     tc.font = Font(bold=True)
     ws.row_dimensions[fila_total].height = 22
 
-    # Fila de "arranque del motor" (warmup): preparación del subsistema acumulada,
-    # aparte del tiempo de las pruebas. Mismo formato que KQNodes/exec.py.
+    # Fila de "arranque del motor" (warmup): SOLO el calentamiento descartable único
+    # previo al lote (la preparación por prueba va en el tiempo de cada prueba).
     fila_warm = fila_total + 1
     warm_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
     for col in range(1, 7):

@@ -29,6 +29,8 @@ from typing import Optional
 from openpyxl.chart import ScatterChart, BarChart, LineChart, Reference, Series
 from openpyxl.chart.marker import Marker
 from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 KS = (3, 4, 5)
 
@@ -127,6 +129,11 @@ def _recolectar(wb, plan_n, cols) -> "list[dict]":
                 break  # fin de pruebas (las filas de resumen tienen alcance vacío)
             alc_lbl = str(alc).strip()
             size = len(set(alc_lbl.upper()))
+            mec = ws.cell(fila, 3).value
+            mec_lbl = str(mec).strip() if mec is not None else ""
+            # Las pruebas empiezan en la fila 6 y la col 1 es =ROW(A1)=1, =ROW(A2)=2, …
+            # ⇒ el nº de prueba es fila-5 (no depende de leer la fórmula de la celda).
+            prueba = fila - 5
             for k in KS:
                 c_qn = cols[k]["qnodes"]
                 c_ge = cols[k]["geomip"]
@@ -136,14 +143,19 @@ def _recolectar(wb, plan_n, cols) -> "list[dict]":
                 ge_t = parse_tiempo(ws.cell(fila, c_ge[2]).value)
                 if None in (qn_loss, ge_loss, qn_t, ge_t):
                     continue
-                qn_part = _canon_particion(ws.cell(fila, c_qn[0]).value)
-                ge_part = _canon_particion(ws.cell(fila, c_ge[0]).value)
+                qn_part_txt = ws.cell(fila, c_qn[0]).value
+                ge_part_txt = ws.cell(fila, c_ge[0]).value
+                qn_part = _canon_particion(qn_part_txt)
+                ge_part = _canon_particion(ge_part_txt)
                 misma = (qn_part is not None and ge_part is not None and qn_part == ge_part)
                 registros.append({
-                    "n": n, "alcance": alc_lbl, "size": size, "k": k,
+                    "n": n, "prueba": prueba, "alcance": alc_lbl, "mecanismo": mec_lbl,
+                    "size": size, "k": k,
                     "qn_loss": qn_loss, "ge_loss": ge_loss,
                     "qn_t": qn_t, "ge_t": ge_t,
                     "delta": ge_loss - qn_loss, "misma": misma,
+                    "qn_part_txt": str(qn_part_txt) if qn_part_txt is not None else "",
+                    "ge_part_txt": str(ge_part_txt) if ge_part_txt is not None else "",
                 })
             fila += 1
     return registros
@@ -177,16 +189,21 @@ def generar_graficos(wb, plan_n, cols, log=print) -> bool:
     ws_dat = wb.create_sheet("Datos_Graficos")
     ws_g = wb.create_sheet("Graficos")
 
-    # Columnas de la tabla auxiliar:
-    # 1 idx | 2 N | 3 alcance | 4 size | 5 QN_loss | 6 GE_loss | 7 QN_t | 8 GE_t | 9 delta | 10 misma
-    HEADER = ["#", "N", "Alcance", "Tamaño", "Φ QNodes", "Φ Geom",
-              "t QNodes (s)", "t Geom (s)", "Δ Φ (Geom−QN)", "¿Misma part?"]
+    # Columnas de la tabla auxiliar (1-indexado):
+    #  1 # (nº de prueba) | 2 N | 3 Alcance | 4 Mecanismo | 5 Tamaño |
+    #  6 Φ QNodes | 7 Φ Geom | 8 t QNodes | 9 t Geom | 10 Δ Φ | 11 ¿Misma? |
+    # 12 Partición QNodes | 13 Partición Geom
+    HEADER = ["#", "N", "Alcance", "Mecanismo", "Tamaño", "Φ QNodes", "Φ Geom",
+              "t QNodes (s)", "t Geom (s)", "Δ Φ (Geom−QN)", "¿Misma part?",
+              "Partición QNodes", "Partición Geom"]
+    NCOL = len(HEADER)
+    _PART_WRAP = Alignment(wrap_text=True, vertical="top")
 
     rangos = {}      # k -> (header_row, data_start, data_end)
     fila = 1
     for k in KS:
         regs_k = sorted([r for r in registros if r["k"] == k],
-                        key=lambda r: (r["size"], r["n"], r["alcance"]))
+                        key=lambda r: (r["n"], r["size"], r["prueba"]))
         if not regs_k:
             continue
         ws_dat.cell(fila, 1, f"k = {k}").font = _BOLD
@@ -195,21 +212,40 @@ def generar_graficos(wb, plan_n, cols, log=print) -> bool:
         _escribir_encabezado(ws_dat, header_row, HEADER)
         fila += 1
         data_start = fila
-        for idx, r in enumerate(regs_k, 1):
-            ws_dat.cell(fila, 1, idx)
+        for r in regs_k:
+            ws_dat.cell(fila, 1, r["prueba"])
             ws_dat.cell(fila, 2, r["n"])
             ws_dat.cell(fila, 3, r["alcance"])
-            ws_dat.cell(fila, 4, r["size"])
-            ws_dat.cell(fila, 5, round(r["qn_loss"], 6))
-            ws_dat.cell(fila, 6, round(r["ge_loss"], 6))
-            ws_dat.cell(fila, 7, round(r["qn_t"], 4))
-            ws_dat.cell(fila, 8, round(r["ge_t"], 4))
-            ws_dat.cell(fila, 9, round(r["delta"], 6))
-            ws_dat.cell(fila, 10, "Sí" if r["misma"] else "No")
+            ws_dat.cell(fila, 4, r["mecanismo"])
+            ws_dat.cell(fila, 5, r["size"])
+            ws_dat.cell(fila, 6, round(r["qn_loss"], 6))
+            ws_dat.cell(fila, 7, round(r["ge_loss"], 6))
+            ws_dat.cell(fila, 8, round(r["qn_t"], 4))
+            ws_dat.cell(fila, 9, round(r["ge_t"], 4))
+            ws_dat.cell(fila, 10, round(r["delta"], 6))
+            ws_dat.cell(fila, 11, "Sí" if r["misma"] else "No")
+            ws_dat.cell(fila, 12, r["qn_part_txt"]).alignment = _PART_WRAP
+            ws_dat.cell(fila, 13, r["ge_part_txt"]).alignment = _PART_WRAP
             fila += 1
         data_end = fila - 1
         rangos[k] = (header_row, data_start, data_end)
+
+        # Tabla de Excel sobre el bloque → da botones de filtro por columna (incl. N).
+        # Se permiten varias tablas por hoja; al filtrar N, Excel oculta las filas y
+        # las gráficas (que solo grafican celdas visibles) se actualizan solas.
+        ref = f"A{header_row}:{get_column_letter(NCOL)}{data_end}"
+        tabla = Table(displayName=f"Datos_k{k}", ref=ref)
+        tabla.tableStyleInfo = TableStyleInfo(
+            name="TableStyleLight9", showRowStripes=True, showColumnStripes=False)
+        ws_dat.add_table(tabla)
+
         fila += 2  # separación entre bloques k
+
+    # Anchos cómodos para las columnas de texto largo (particiones, alcance/mecanismo).
+    ws_dat.column_dimensions["C"].width = 16
+    ws_dat.column_dimensions["D"].width = 16
+    ws_dat.column_dimensions[get_column_letter(12)].width = 22
+    ws_dat.column_dimensions[get_column_letter(13)].width = 22
 
     # Tabla resumen "¿misma partición?" por k.
     resumen_hdr = fila
@@ -248,10 +284,10 @@ def generar_graficos(wb, plan_n, cols, log=print) -> bool:
         sc = ScatterChart()
         sc.title = f"(a) Tiempo vs tamaño de subsistema — k={k}"
         sc.x_axis.title = "Tamaño del subsistema (nodos del alcance)"
-        sc.y_axis.title = "Tiempo de búsqueda (s)"
+        sc.y_axis.title = "Tiempo por prueba: prep+búsqueda (s)"
         sc.height = 9; sc.width = 17
-        xref = Reference(ws_dat, min_col=4, min_row=ds, max_row=de)
-        for col, nombre, color in ((7, "QNodes", "1F77B4"), (8, "Geométrica", "D62728")):
+        xref = Reference(ws_dat, min_col=5, min_row=ds, max_row=de)
+        for col, nombre, color in ((8, "QNodes", "1F77B4"), (9, "Geométrica", "D62728")):
             yref = Reference(ws_dat, min_col=col, min_row=ds, max_row=de)
             serie = Series(yref, xref, title=nombre)
             serie.marker = Marker(symbol="circle", size=5)
@@ -265,7 +301,7 @@ def generar_graficos(wb, plan_n, cols, log=print) -> bool:
         lc.x_axis.title = "Subsistema (ordenado por tamaño)"
         lc.y_axis.title = "Pérdida Φ (EMD)"
         lc.height = 9; lc.width = 17
-        datos_b = Reference(ws_dat, min_col=5, max_col=6, min_row=hr, max_row=de)
+        datos_b = Reference(ws_dat, min_col=6, max_col=7, min_row=hr, max_row=de)
         cats = Reference(ws_dat, min_col=1, min_row=ds, max_row=de)
         lc.add_data(datos_b, titles_from_data=True)
         lc.set_categories(cats)
@@ -278,7 +314,7 @@ def generar_graficos(wb, plan_n, cols, log=print) -> bool:
         bc.x_axis.title = "Subsistema (QNodes = referencia / 0)"
         bc.y_axis.title = "Δ Φ = Φ_Geom − Φ_QNodes"
         bc.height = 9; bc.width = 17
-        datos_c = Reference(ws_dat, min_col=9, min_row=hr, max_row=de)
+        datos_c = Reference(ws_dat, min_col=10, min_row=hr, max_row=de)
         bc.add_data(datos_c, titles_from_data=True)
         bc.set_categories(cats)
         ws_g.add_chart(bc, f"U{fila_ancla}")

@@ -154,7 +154,8 @@ def block(req: BlockReq):
         # prueba, su tiempo quedaría inflado y engañoso. Por eso ejecutamos una
         # corrida de calentamiento DESCARTABLE antes del lote, con los parámetros
         # de la primera prueba válida, y la contabilizamos aparte como "arranque".
-        # Tras ello, TODAS las pruebas (incluida la primera) miden solo su búsqueda.
+        # Tras ello, cada prueba mide su preparación de subsistema + búsqueda (la
+        # preparación es trabajo por prueba; el arranque único queda fuera).
         tiempo_warmup_acum = 0.0
         fila_warm = next(
             (f for f in filas_csv if f.get("alcance") and f.get("mecanismo")), None
@@ -175,9 +176,9 @@ def block(req: BlockReq):
             tiempo_warmup_acum = time.time() - t_warm
             yield _evento("warmup", {"tiempo_arranque": tiempo_warmup_acum})
 
-        # Acumulado de tiempo de búsqueda (suma por prueba); el wall-clock del lote
-        # (t0) arranca aquí para que el arranque del motor quede fuera de él.
-        tiempo_busqueda_acum = 0.0
+        # Acumulado del tiempo POR PRUEBA (preparación + búsqueda); el wall-clock del
+        # lote (t0) arranca aquí para que el arranque del motor quede fuera de él.
+        tiempo_pruebas_acum = 0.0
         t0 = time.time()
 
         for idx, fila in enumerate(filas_csv, start=1):
@@ -214,9 +215,12 @@ def block(req: BlockReq):
                 yield _evento("fila", {"idx": idx, "total": total, **base})
                 continue
 
+            # tiempo_total_segundos ya viene normalizado: preparación + búsqueda de
+            # ESTA prueba (igual para KGeoMIP y KQNodes). La preparación del subsistema
+            # es trabajo por prueba y se incluye aquí, no en el arranque.
             tiempo_seg = float(resp.get("tiempo_total_segundos", 0.0))
             tiempo_prep = float(resp.get("tiempo_preparacion_segundos", 0.0))
-            tiempo_busqueda_acum += tiempo_seg
+            tiempo_pruebas_acum += tiempo_seg
             perdida = float(resp["perdida_phi"])
             # Pérdida relativa (Φ/masa) y banda cualitativa por prueba → "precisión".
             rel = M.perdida_relativa(
@@ -263,12 +267,12 @@ def block(req: BlockReq):
             "tasa_exito": (exitosas / total) if total else 0.0,
             "tiempo_total": tiempo_total,
             "tiempo_total_fmt": formatear_tiempo(tiempo_total),
-            "tiempo_busqueda": tiempo_busqueda_acum,
-            "tiempo_busqueda_fmt": formatear_tiempo(tiempo_busqueda_acum),
+            "tiempo_pruebas": tiempo_pruebas_acum,
+            "tiempo_pruebas_fmt": formatear_tiempo(tiempo_pruebas_acum),
             "tiempo_arranque": tiempo_warmup_acum,
             "tiempo_arranque_fmt": formatear_tiempo(tiempo_warmup_acum),
-            "tiempo_promedio": (tiempo_busqueda_acum / exitosas) if exitosas else 0.0,
-            "tiempo_promedio_fmt": formatear_tiempo((tiempo_busqueda_acum / exitosas) if exitosas else 0.0),
+            "tiempo_promedio": (tiempo_pruebas_acum / exitosas) if exitosas else 0.0,
+            "tiempo_promedio_fmt": formatear_tiempo((tiempo_pruebas_acum / exitosas) if exitosas else 0.0),
             "phi_promedio": (sum(n_phi) / len(n_phi)) if n_phi else 0.0,
             "phi_total": sum(n_phi),
             "phi_relativo_promedio": (sum(n_rel) / len(n_rel)) if n_rel else 0.0,

@@ -66,10 +66,17 @@ dentro de la primera prueba, su tiempo guardado quedaría **inflado y engañoso*
 Por eso `/api/block`, antes de iterar el lote, ejecuta una **corrida de calentamiento
 descartable** con los parámetros de la primera prueba válida y la contabiliza aparte
 como **"arranque del motor"** (fila *Arranque motor (warmup)* del XLSX y campo
-`tiempo_arranque` del evento SSE `fin`). Tras el warmup, **todas** las pruebas —incluida
-la primera— miden únicamente su tiempo de búsqueda, y el "Tiempo Total Lote" (wall-clock)
-excluye el arranque. Es el mismo principio que ya aplica el modo bloque de los `exec.py`
-de terminal (calentar cachés antes de la primera prueba).
+`tiempo_arranque` del evento SSE `fin`). El "Tiempo Total Lote" (wall-clock) excluye el
+arranque.
+
+> **Cambio (2026-06-14).** El tiempo guardado de cada prueba es ahora **preparación de su
+> subsistema + búsqueda**, no solo la búsqueda. La preparación (`substraer` con el
+> alcance/mecanismo de la prueba; en KQNodes además reconstruye todo el `System` por no
+> cachear) es trabajo **específico por prueba** y debe contar en su tiempo; el "arranque"
+> queda solo con el warmup único. `worker_runner` emite `tiempo_total_segundos` ya
+> normalizado a prep+búsqueda para **ambos** motores (antes `tiempo_ejecucion` lo incluía
+> en KGeoMIP pero no en KQNodes), y el SSE `fin` reporta el Σ como `tiempo_pruebas`. Mismo
+> criterio aplicado en los `exec.py` de terminal y en `run_suite_2026.py`.
 
 ## Análisis comparativo (KQNodes vs KGeoMIP)
 
