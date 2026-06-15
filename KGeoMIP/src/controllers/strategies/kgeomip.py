@@ -1954,19 +1954,12 @@ class KGeoMIP(SIA):
                 f"tabla_T will require ~{total_states * n * 4 / 1e9:.2f} GB float32."
             )
 
-        # Per-node probability rows P[x][s] = P(variable x = 1 | joint state s).
-        prob = np.array(
-            [ncubo.data.ravel() for ncubo in subsistema.ncubos],
-            dtype=np.float32,
-        )
-
         # Origin = little-endian packing of the initial state over the mechanism dims.
         estado_ini = subsistema.estado_inicial[subsistema.dims_ncubos]
         idx_origen = 0
         for pos, bit in enumerate(estado_ini):
             if bit:
                 idx_origen |= 1 << pos
-        prob_origen = prob[:, idx_origen]        # (n,)
 
         estados = np.arange(total_states, dtype=np.int32)
         xor_origen = (estados ^ idx_origen).astype(np.uint32)
@@ -1976,16 +1969,28 @@ class KGeoMIP(SIA):
 
         if _NUMBA_DISPONIBLE:
             # Ruta JIT: un kernel njit recorre los estados en orden de popcount
-            # ascendente y aplica la misma recurrencia (resultado equivalente a la
-            # ruta numpy). prob_T contiguo por filas para acceso cache-friendly.
-            prob_T = np.ascontiguousarray(prob.T)                 # (total_states, n)
-            prob_origen_c = np.ascontiguousarray(prob_origen)     # (n,)
+            # ascendente y aplica la recurrencia. prob_T (filas = estados, contiguo
+            # por filas para acceso cache-friendly) se construye DIRECTAMENTE columna
+            # a columna desde los n-cubos, SIN materializar antes prob (n×2^d) ni su
+            # transpuesta: una sola copia de 2^d×n en vez de dos (ahorra ~3.35 GB en
+            # N25). Mismos valores y mismo Φ que la versión anterior.
+            prob_T = np.empty((total_states, n), dtype=np.float32)
+            for i, ncubo in enumerate(subsistema.ncubos):
+                prob_T[:, i] = ncubo.data.ravel()
+            prob_origen_c = np.ascontiguousarray(prob_T[idx_origen])   # (n,)
             orden = np.argsort(dist, kind="stable").astype(np.int32)
             _kernel_tabla_costos(
                 prob_T, prob_origen_c, xor_origen, orden,
                 int(n_dims), int(n), self.tabla_T,
             )
         else:
+            # Ruta numpy (sin Numba): opera por bloques de columnas prob[:, bloque],
+            # así que aquí sí se necesita prob (n×2^d). Solo se construye en esta rama.
+            prob = np.array(
+                [ncubo.data.ravel() for ncubo in subsistema.ncubos],
+                dtype=np.float32,
+            )
+            prob_origen = prob[:, idx_origen]        # (n,)
             bit_pos = range(n_dims)
 
             # Walk the Hamming shells outward; shell d only depends on shell d-1.
@@ -2028,7 +2033,14 @@ class KGeoMIP(SIA):
         # Empty dict retained for backward compatibility with external references.
         self.tabla_transiciones = {}
 
-        self._construir_matriz_afinidad()
+        # NOTA (optimización 2026-06): NO se construye la matriz de afinidad.
+        # El camino de producción (greedy top-down + cut_pool + 1-move) nunca la
+        # consume: _evaluar_k_completo / _particion_grafo_hipercubo son el camino
+        # espectral antiguo, sin uso actual. Construirla recorría toda la tabla
+        # 2^n_dims×n DOS veces en float64 (astype + división) por cada corrida y
+        # para CADA N — CPU desperdiciado siempre y ~13 GB de pico en N25. Si en el
+        # futuro se reactiva el camino espectral, llamar _construir_matriz_afinidad()
+        # explícitamente allí (versión chunked, no la astype(float64) completa).
 
 
     def _calcular_costo(

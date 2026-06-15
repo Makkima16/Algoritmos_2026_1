@@ -24,6 +24,25 @@ _CANDIDATO_CACHE: dict = {}
 # Caché para subsistemas completos (clave: id(tpm), estado, condicion, alcance, mecanismo)
 _SUBSISTEMA_CACHE: dict = {}
 
+# Límite de entradas de los cachés. Antes crecían SIN límite: en un lote/bloque cada
+# prueba tiene alcance/mecanismo distintos → su clave de subsistema es única y NUNCA se
+# reutiliza, así que el caché acumulaba un subsistema (con sus NCubos, enormes en N
+# grande) por prueba — y en el worker persistente del dashboard a lo largo de TODOS los
+# lotes. La RAM crecía, el SO paginaba y las pruebas siguientes se volvían más lentas.
+# Se acotan a las últimas entradas (FIFO por orden de inserción): el candidato es común
+# a todo el lote (basta 1) y el subsistema solo se reutiliza si se repite EXACTAMENTE la
+# misma prueba (caso raro). El candidato cacheado evita reconstruir el System completo
+# O(N·2^N) por prueba; el subsistema por prueba (substraer) es trabajo inevitable.
+_CANDIDATO_CACHE_MAX: int = 2
+_SUBSISTEMA_CACHE_MAX: int = 2
+
+
+def _acotar_cache(cache: dict, maximo: int) -> None:
+    """Descarta las entradas más antiguas (FIFO por orden de inserción) hasta dejar
+    como mucho `maximo`, evitando el crecimiento ilimitado de RAM entre pruebas."""
+    while len(cache) > maximo:
+        cache.pop(next(iter(cache)))
+
 
 class SIA(ABC):
     """
@@ -113,6 +132,7 @@ class SIA(ABC):
             candidato = completo.condicionar(dims_condicionadas)
             self.sia_logger.critic("Candidato creado.")
             _CANDIDATO_CACHE[cache_key] = candidato
+            _acotar_cache(_CANDIDATO_CACHE, _CANDIDATO_CACHE_MAX)
 
         # Intentar cargar subsistema desde caché (incluye alcance y mecanismo)
         subs_key = (id(tpm), tuple(estado_inicial.tolist()), condicion, alcance, mecanismo)
@@ -123,6 +143,7 @@ class SIA(ABC):
             subsistema = candidato.substraer(dims_alcance, dims_mecanismo)
             self.sia_logger.critic("Subsistema creado.")
             _SUBSISTEMA_CACHE[subs_key] = subsistema
+            _acotar_cache(_SUBSISTEMA_CACHE, _SUBSISTEMA_CACHE_MAX)
         # self.sia_logger.debug(f"{dims_alcance, dims_mecanismo=}")
         # self.sia_logger.debug(subsistema)
 

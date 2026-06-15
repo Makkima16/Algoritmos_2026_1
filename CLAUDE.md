@@ -100,6 +100,11 @@ python KGeoMIP/exec_kgeomip.py
 Las TPMs y CSV de pruebas se leen de la carpeta `data/` de la raíz (compartida);
 los resultados se guardan en `KGeoMIP/results/`. El modo bloque/manual registra
 además el tiempo de "arranque del motor" (warmup) aparte del tiempo de las pruebas.
+Desde 2026-06-14 ese "arranque" es solo el coste **único** (Numba JIT + pool +
+condicionado del candidato); la preparación del subsistema **por prueba** (substraer
+con su alcance/mecanismo) se incluye en el tiempo de la prueba, no en el warmup.
+KQNodes hace lo mismo, pero al no tener caché ni warmup separado su fila de arranque
+queda en 0 (cada prueba reconstruye su subsistema y ese coste va en su propio tiempo).
 
 Al ejecutar se ofrece:
 - **Modo 1 — Manual**: ingreso interactivo de candidato, estado, alcance, mecanismo y K.
@@ -144,8 +149,13 @@ manuales o por bloque (SSE). Dos comportamientos a tener presentes en el modo an
 - **Arranque del motor (warmup):** `/api/block` ejecuta una corrida de calentamiento
   DESCARTABLE con los parámetros de la primera prueba válida ANTES del lote, y la
   contabiliza aparte como "arranque del motor" (fila *Arranque motor (warmup)* del XLSX,
-  campo `tiempo_arranque` del SSE). Así la primera prueba ya NO incluye el arranque y su
-  tiempo guardado refleja solo su búsqueda; el "Tiempo Total Lote" excluye el warmup.
+  campo `tiempo_arranque` del SSE). El "Tiempo Total Lote" excluye el warmup.
+  Desde 2026-06-14 el tiempo guardado de cada prueba es **preparación de su subsistema +
+  búsqueda** (costo real por prueba), no solo la búsqueda: la preparación es trabajo por
+  prueba (varía con alcance/mecanismo) y el "arranque" queda solo con el warmup único.
+  `worker_runner` normaliza `tiempo_total_segundos` = prep+búsqueda para AMBOS motores
+  (antes `tiempo_ejecucion` incluía la prep en KGeoMIP pero no en KQNodes); el SSE de
+  bloque reporta el Σ como `tiempo_pruebas`/`tiempo_pruebas_fmt`.
 - **Ganador "Ambos":** en la comparación por bloque (vista *Análisis*), si KQNodes y
   KGeoMIP arrojan la misma pérdida Φ, la columna *Mejor* muestra **"Ambos"** (antes el
   empate se adjudicaba a KQNodes por el `<=`). Detalle en `dashboard/README.md`.
@@ -160,7 +170,7 @@ AYDA reimplementa estructuralmente la búsqueda y evaluación de k-particiones �
 |----------|---------------------------------------|-------------------------|
 | **Cálculo EMD (Métrica)** | Distancia simple tipo L1 (`emd_efecto`) sumando las diferencias aisladas de variables de causa/efecto marginales. Generaba valores artificialmente bajos $φ$. | Verdadera Earth Mover's Distance (`emd_causal`) interlazada mediante PyEMD sobre el espacio probabilístico conjunto con base de Distancia de Hamming. |
 | **Puntaje $φ$ Reportado** | Valores reducidos artificialmente (p.ej. $0.4$) al omitir interconexión causal cruzada de los sub-estados. | Magnitudes matemáticamente realistas sobre el espacio matricial ($φ > 1.0$) según los cortes iterativos reales. |
-| **Búsqueda Óptima** | "Hill-Climbing" simple con selección estocástica ciega inicial. | Generación de Matrices de Afinidad Geométrica (*Spectral Clustering*) + Refinamiento Local iterativo (1-move). |
+| **Búsqueda Óptima** | "Hill-Climbing" simple con selección estocástica ciega inicial. | Greedy top-down asimétrico sobre un *cut pool* geométrico derivado de la tabla de costos + Refinamiento Local iterativo (1-move). *(El camino de Spectral Clustering sobre matriz de afinidad quedó como código legado sin uso; su construcción se eliminó del arranque en 2026-06-14 — ver `KGeoMIP/docs/GeoMIP_Optimizaciones.md` §11.)* |
 | **Manejo del "Estado Vacío"** | Los nodos quedaban causalmente destrozados en estados vacíos (Over-cutting) sin penalización alta. | Causalidad topológica conservada; el mecanismo ∅ se permite pero evalúa contra su peso probabilístico de Hamming rigurosamente (`generar_candidatos_presente_vacio`). |
 | **Arquitectura Algorítmica** | Implementación imperativa genérica para bipartir iterativamente. | Modelado OOP (`System`, `NCube`), memorización de sub-distribuciones (KQNodes `DynamicPartition`), paralelismo con `ProcessPoolExecutor` y control K-múltiple por hilos locales de CPU. |
 

@@ -15,18 +15,18 @@ nombre de paquete `src` y no pueden importarse en el mismo proceso.
 Las TPMs y los datos viven en la carpeta data/ de la RAÍZ del repositorio (la
 misma que usan KGeoMIP y KQNodes); sólo los resultados van a results_test/.
 
-Por cada prueba terminada se escribe Partición / Pérdida / Tiempo (sólo el tiempo
-de BÚSQUEDA, sin el de "calentar motores") en la columna que corresponde, PERO la
-copia en disco SÓLO se guarda al terminar cada lote (N, motor, k) — guardar por
+Por cada prueba terminada se escribe Partición / Pérdida / Tiempo (preparación de su
+subsistema + BÚSQUEDA, el costo real de pared por prueba) en la columna que corresponde,
+PERO la copia en disco SÓLO se guarda al terminar cada lote (N, motor, k) — guardar por
 prueba ralentizaba mucho el suite, sobre todo en N altos. Si una prueba falla se
 marca ERROR en memoria y se persiste igual al cerrar el lote; si el proceso se
 cae a mitad de un k se pierde lo no guardado de ese k y basta re-ejecutarlo.
 Además, al terminar cada lote (N, motor, k) se escriben, debajo de las pruebas y
 en la columna de Tiempo de ese motor/k, dos celdas:
-  • Tiempo total de las pruebas (Σ de los tiempos de búsqueda del lote).
-  • Justo debajo, el tiempo de "arranque del motor" (warmup): boot del subproceso
-    + preparación del subsistema/tabla — el coste de iniciar motores, aparte del
-    tiempo de las pruebas.
+  • Tiempo total de las pruebas (Σ de preparación + búsqueda del lote).
+  • Justo debajo, el tiempo de "arranque del motor" (warmup): SOLO el boot único del
+    subproceso (spawn + import + carga de la TPM + creación del motor). La preparación
+    del subsistema por prueba ya va dentro del tiempo de cada prueba, no aquí.
 
 Las pruebas que fallan se marcan como ERROR y se continúa. Las columnas de
 BIPARTICIONES nunca se tocan.
@@ -170,7 +170,10 @@ def escribir_resultado(ws, fila: int, cols, res: dict) -> None:
         cp.alignment = _PART_ALIGN
         cp.font = Font()
         ws.cell(row=fila, column=c_perd, value=round(float(res["perdida"]), 6)).alignment = _CENTER
-        ws.cell(row=fila, column=c_tiem, value=formatear_tiempo(float(res["tiempo"]))).alignment = _CENTER
+        # Tiempo de la prueba = preparación de su subsistema + búsqueda (costo real de
+        # pared por prueba; la preparación es trabajo específico de cada prueba).
+        t_prueba = float(res["tiempo"]) + float(res.get("prep", 0.0))
+        ws.cell(row=fila, column=c_tiem, value=formatear_tiempo(t_prueba)).alignment = _CENTER
     else:
         cp = ws.cell(row=fila, column=c_part, value=f"ERROR: {res.get('error', 'desconocido')}")
         cp.alignment = _PART_ALIGN
@@ -193,7 +196,7 @@ def escribir_resumen_tiempos(ws, col_tiempo, fila_tests, fila_warm, t_tests, t_w
 
 def escribir_etiquetas_resumen(ws, fila_tests, fila_warm):
     """Etiqueta (col 1) las dos filas de resumen de tiempos de una hoja."""
-    et = ws.cell(row=fila_tests, column=1, value="Tiempo total pruebas (Σ búsqueda)")
+    et = ws.cell(row=fila_tests, column=1, value="Tiempo total pruebas (Σ prep+búsqueda)")
     et.font = _BOLD
     et.fill = _TOT_FILL
     et.alignment = _CENTER
@@ -345,8 +348,9 @@ def correr_lote(wb, ws, dest_path, n, tpm_path, engine, k, estado, candidato_bit
             fila = payload["row"]
             escribir_resultado(ws, fila, cols, payload)
             if payload.get("ok"):
-                t_tests += float(payload.get("tiempo", 0.0))
-                t_prep += float(payload.get("prep", 0.0))
+                # El tiempo de la prueba incluye su preparación de subsistema.
+                t_tests += float(payload.get("tiempo", 0.0)) + float(payload.get("prep", 0.0))
+                t_prep += float(payload.get("prep", 0.0))   # solo informativo
             # NO se guarda por prueba (lento): el lote completo se persiste al
             # terminar el k (más abajo). Si una prueba falla se marca ERROR en
             # memoria y se persiste igual al cerrar el lote.
@@ -361,8 +365,10 @@ def correr_lote(wb, ws, dest_path, n, tpm_path, engine, k, estado, candidato_bit
         except OSError:
             pass
 
-    # Warmup = boot del subproceso + preparación de subsistema/tabla de las pruebas.
-    t_warmup = boot_time + t_prep
+    # Arranque (warmup) = SOLO el boot único del subproceso: spawn + import + carga de
+    # la TPM + creación del motor (hasta "ready"). La preparación de subsistema por
+    # prueba ya va incluida en el tiempo de cada prueba (y en t_tests), no aquí.
+    t_warmup = boot_time
     escribir_resumen_tiempos(ws, col_tiempo, fila_tests, fila_warm, t_tests, t_warmup)
     wb.save(dest_path)
 
