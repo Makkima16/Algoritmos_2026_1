@@ -6,17 +6,28 @@ Procesa ÚNICAMENTE las muestras pequeñas de Brute_Force/samples_force/ (N ≤ 
 que es donde la fuerza bruta exhaustiva es tratable. Los archivos con N > 6 se
 omiten: la fuerza bruta no se compara contra samples_binary ni ningún N grande.
 
-Parámetros de análisis por CSV:
-  estado    = "0" * N   (todos ceros)
-  candidato = alcance = mecanismo = "1" * N   (sistema completo)
+Por cada archivo se generan VARIAS pruebas (configuraciones distintas de
+alcance/mecanismo, hasta `N_PRUEBAS_POR_ARCHIVO`), de modo que haya muchas
+pruebas por cada k y por cada N — no una sola como antes. Parámetros fijos por
+prueba:
+  estado    = "0" * N         (todos ceros)
+  candidato = "1" * N         (sistema completo de fondo)
+  alcance / mecanismo         ← varían por prueba (subconjuntos no vacíos)
+
+El muestreo de (alcance, mecanismo) es determinista (seed fijo) y siempre incluye
+primero el sistema completo ('1'*N, '1'*N). Para N pequeños cuyo espacio total de
+combinaciones es menor que `N_PRUEBAS_POR_ARCHIVO` (p. ej. N=2 → 9 combos) se usan
+todas las posibles.
 
 BruteForce y KQNodes corren en el proceso actual (KQNodes/src en sys.path).
-KGeoMIP corre en subproceso aislado vía data/_worker_motor.py para evitar
-el conflicto de nombres de paquete 'src' entre KGeoMIP y KQNodes.
+KGeoMIP corre en subproceso aislado vía data/_worker_motor.py para evitar el
+conflicto de nombres de paquete 'src' entre KGeoMIP y KQNodes. Para no pagar el
+arranque del subproceso una vez por prueba, TODAS las pruebas de un mismo k se
+mandan en UN solo subproceso (el worker acepta una lista de tests).
 
 Salida: Brute_Force/results/comparacion_fuerza_bruta_<fecha>.xlsx
-  Hoja "BF vs KQNodes vs KGeoMIP"  — comparación por k para N ≤ 6
-  Hoja "KQNodes vs KGeoMIP"        — comparación QN vs GEO para esos mismos N ≤ 6
+  Hoja "BF vs KQNodes vs KGeoMIP"  — comparación por (prueba, k) para N ≤ 6
+  Hoja "KQNodes vs KGeoMIP"        — comparación QN vs GEO para esos mismos casos
 
 Uso:
     .venv/Scripts/python Brute_Force/comparar_fuerza_bruta.py
@@ -26,6 +37,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -57,6 +69,11 @@ RESULT_SENTINEL  = "@@RESULT@@"
 TOLERANCIA       = 1e-9   # para considerar dos Phi "idénticos"
 TOLERANCIA_COTA  = 1e-6   # margen para fallo de cota (evita falsos positivos por float32 vs float64)
 N_MAX_BF         = 6      # límite práctico de la fuerza bruta
+
+# Cuántas pruebas (configuraciones de alcance/mecanismo) generar por archivo.
+# Si el espacio total de combinaciones no vacías es menor, se usan todas.
+N_PRUEBAS_POR_ARCHIVO = 20
+SEED_PRUEBAS          = 2026
 
 # samples_force/ → SOLO N pequeños (N ≤ 6) — BF + KQNodes + KGeoMIP.
 # La fuerza bruta NO se ejecuta sobre samples_binary ni N grandes (intratable).
@@ -101,6 +118,29 @@ def cargar_tpm(csv_path: Path) -> tuple:
     return tpm, int(tpm.shape[1])
 
 
+def generar_pruebas(n: int, cantidad: int, seed: int = SEED_PRUEBAS) -> list:
+    """Genera hasta `cantidad` pruebas (alcance, mecanismo) distintas para N nodos.
+
+    Cada máscara es un string binario de longitud n con al menos un bit en 1
+    (subconjunto no vacío de nodos). Siempre incluye primero el sistema completo
+    ('1'*n, '1'*n). Si el espacio total de combinaciones es ≤ `cantidad`, devuelve
+    todas. El muestreo es determinista (seed fijo + n) para reproducibilidad.
+    """
+    # El alcance necesita ≥ 2 nodos activos para que k=2 sea válido.
+    # El mecanismo puede ser cualquier subconjunto no vacío.
+    alc_validos = [format(i, f"0{n}b") for i in range(1, 2 ** n) if bin(i).count("1") >= 2]
+    mec_validos = [format(i, f"0{n}b") for i in range(1, 2 ** n)]
+    full = ("1" * n, "1" * n)
+    combos = [(a, m) for a in alc_validos for m in mec_validos]
+    if len(combos) <= cantidad:
+        combos = [c for c in sorted(combos) if c != full]
+        return [full] + combos
+    rng = random.Random(seed + n)
+    resto = [c for c in combos if c != full]
+    muestra = sorted(rng.sample(resto, cantidad - 1))
+    return [full] + muestra
+
+
 def comparar_phi(phi_bf: float, phi_heur: float) -> tuple:
     """Devuelve (igual, cota_ok, err_rel) comparando heurística contra bruta.
 
@@ -115,10 +155,10 @@ def comparar_phi(phi_bf: float, phi_heur: float) -> tuple:
 
 # ── Motores ───────────────────────────────────────────────────────────────────
 
-def correr_bruta(tpm: np.ndarray, n: int, estado: str,
-                 k: Optional[int], permitir_vacio: bool) -> dict:
+def correr_bruta(tpm: np.ndarray, n: int, estado: str, candidato: str,
+                 alcance: str, mecanismo: str, k: Optional[int],
+                 permitir_vacio: bool) -> dict:
     """Fuerza bruta exhaustiva k-MIP (BruteForceKMIP, solo N ≤ 6)."""
-    candidato = alcance = mecanismo = "1" * n
     try:
         t0 = time.time()
         with _silenciar():
@@ -145,10 +185,10 @@ def correr_bruta(tpm: np.ndarray, n: int, estado: str,
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def correr_qnodes(tpm: np.ndarray, n: int, estado: str,
-                  k: Optional[int], permitir_vacio: bool) -> dict:
+def correr_qnodes(tpm: np.ndarray, n: int, estado: str, candidato: str,
+                  alcance: str, mecanismo: str, k: Optional[int],
+                  permitir_vacio: bool) -> dict:
     """KQNodes en proceso."""
-    candidato = alcance = mecanismo = "1" * n
     try:
         t0 = time.time()
         with _silenciar():
@@ -171,91 +211,63 @@ def correr_qnodes(tpm: np.ndarray, n: int, estado: str,
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def correr_geomip(csv_path: Path, n: int, estado: str,
-                  k: Optional[int], permitir_vacio: bool) -> dict:
-    """KGeoMIP en subproceso aislado (evita conflicto de paquetes src)."""
-    candidato = alcance = mecanismo = "1" * n
+def correr_geomip_lote(csv_path: Path, n: int, estado: str, candidato: str,
+                       k: int, pruebas: list, permitir_vacio: bool) -> dict:
+    """KGeoMIP en subproceso aislado para TODAS las pruebas de un mismo k.
+
+    Manda la lista completa de tests al worker (un único arranque del motor) y
+    devuelve {indice_prueba (1-based): payload}. payload trae ok/perdida/tiempo/
+    particion o ok=False/error.
+    """
+    tests = [{"row": i, "alcance": a, "mecanismo": m}
+             for i, (a, m) in enumerate(pruebas, 1)]
     cfg = {
         "engine": "geomip",
         "root": str(GEOMIP_ROOT),
-        "tpm": str(csv_path),
+        # Ruta ABSOLUTA: el worker hace os.chdir(root=KGeoMIP) antes de leer la
+        # TPM, así que una ruta relativa al CWD original quedaría rota.
+        "tpm": str(Path(csv_path).resolve()),
         "estado": estado,
         "candidato": candidato,
         "permitir_presente_vacio": permitir_vacio,
         "k": k,
-        "tests": [{"row": 1, "alcance": alcance, "mecanismo": mecanismo}],
+        "tests": tests,
     }
     with tempfile.NamedTemporaryFile("w", suffix=".json",
                                      delete=False, encoding="utf-8") as tf:
         json.dump(cfg, tf, ensure_ascii=False)
         lote = tf.name
+
+    resultados: dict = {}
     try:
-        proc = subprocess.Popen(
+        # Leemos toda la salida de una vez (communicate). El patrón de lectura
+        # incremental por líneas con bufsize=1 resultó intermitente en Windows
+        # (a veces el pipe se cierra antes de leer nada); communicate es estable.
+        proc = subprocess.run(
             [PYTHON, str(WORKER), lote],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, encoding="utf-8", bufsize=1,
+            text=True, encoding="utf-8", errors="replace",
         )
-        resultado: dict = {"ok": False, "error": "sin respuesta del worker"}
-        for linea in proc.stdout:
+        for linea in proc.stdout.splitlines():
             if not linea.startswith(RESULT_SENTINEL):
                 continue
             payload = json.loads(linea[len(RESULT_SENTINEL):])
             if "fatal" in payload:
-                return {"ok": False, "error": payload["fatal"]}
+                return {i: {"ok": False, "error": payload["fatal"]}
+                        for i in range(1, len(pruebas) + 1)}
             if "ready" in payload:
                 continue
-            resultado = payload
-        proc.wait()
+            resultados[payload["row"]] = payload
     finally:
         try:
             os.unlink(lote)
         except OSError:
             pass
 
-    if resultado.get("ok"):
-        resultado["tiempo"] = float(resultado.get("tiempo", 0.0))
-    return resultado
-
-
-# ── Comparación QN vs GEO (sin fuerza bruta) ─────────────────────────────────
-
-def procesar_solo_comp(csv_path: Path, tpm: np.ndarray, n: int,
-                       nombre: str, estado: str, k: Optional[int],
-                       permitir_vacio: bool, filas_comp: list) -> None:
-    k_lbl = "libre" if k is None else str(k)
-    print(f"    QNodes  k={k_lbl}...", end=" ", flush=True)
-    qn_res = correr_qnodes(tpm, n, estado, k, permitir_vacio)
-    print("OK" if qn_res.get("ok") else "ERR")
-
-    print(f"    KGeoMIP k={k_lbl}...", end=" ", flush=True)
-    geo_res = correr_geomip(csv_path, n, estado, k, permitir_vacio)
-    print("OK" if geo_res.get("ok") else "ERR")
-
-    phi_qn  = float(qn_res["perdida"])  if qn_res.get("ok")  else None
-    phi_geo = float(geo_res["perdida"]) if geo_res.get("ok") else None
-    t_qn    = round(float(qn_res.get("tiempo", 0)), 4)  if qn_res.get("ok")  else None
-    t_geo   = round(float(geo_res.get("tiempo", 0)), 4) if geo_res.get("ok") else None
-
-    if phi_qn is not None and phi_geo is not None:
-        diff_abs = abs(phi_qn - phi_geo)
-        mn = min(phi_qn, phi_geo)
-        err_rel  = round(diff_abs / mn, 9) if mn > TOLERANCIA else 0.0
-        coinciden = diff_abs <= TOLERANCIA
-    else:
-        diff_abs = err_rel = None
-        coinciden = False
-
-    filas_comp.append({
-        "archivo": nombre, "n": n, "k": k if k is not None else "libre",
-        "phi_qn":  round(phi_qn, 9)  if phi_qn  is not None else "ERROR",
-        "phi_geo": round(phi_geo, 9) if phi_geo is not None else "ERROR",
-        "coinciden": coinciden,
-        "diff_abs": round(diff_abs, 9) if diff_abs is not None else None,
-        "err_rel":  err_rel,
-        "t_qn": t_qn, "t_geo": t_geo,
-        "nota_qn":  "" if qn_res.get("ok")  else qn_res.get("error", ""),
-        "nota_geo": "" if geo_res.get("ok") else geo_res.get("error", ""),
-    })
+    # Pruebas sin respuesta → error explícito.
+    for i in range(1, len(pruebas) + 1):
+        resultados.setdefault(i, {"ok": False, "error": "sin respuesta del worker"})
+    return resultados
 
 
 # ── Exportación XLSX ──────────────────────────────────────────────────────────
@@ -270,7 +282,7 @@ def _escribir_cabeceras(ws, cabeceras: list) -> None:
     for col, titulo in enumerate(cabeceras, 1):
         c = ws.cell(row=1, column=col, value=titulo)
         c.font, c.fill, c.alignment = hf, hfll, ctr
-        ws.column_dimensions[get_column_letter(col)].width = max(16, len(titulo) + 2)
+        ws.column_dimensions[get_column_letter(col)].width = max(14, len(titulo) + 2)
     ws.freeze_panes = "A2"
     ws.row_dimensions[1].height = 30
 
@@ -293,7 +305,7 @@ def exportar_xlsx(filas_bf: list, filas_comp: list) -> Path:
     ws1 = wb.active
     ws1.title = "BF vs KQNodes vs KGeoMIP"
     hdrs1 = [
-        "Archivo", "N", "k",
+        "Archivo", "N", "Prueba", "Alcance", "Mecanismo", "k",
         "Φ_FuerzaBruta", "Φ_KQNodes", "Φ_KGeoMIP",
         "QN_≥_BF", "GEO_≥_BF",
         "err_rel_QN", "err_rel_GEO",
@@ -305,7 +317,8 @@ def exportar_xlsx(filas_bf: list, filas_comp: list) -> Path:
 
     for ri, f in enumerate(filas_bf, 2):
         row = [
-            f.get("archivo"), f.get("n"), f.get("k"),
+            f.get("archivo"), f.get("n"), f.get("prueba"),
+            f.get("alcance"), f.get("mecanismo"), f.get("k"),
             f.get("phi_bf"), f.get("phi_qn"), f.get("phi_geo"),
             f.get("qn_cota_ok"), f.get("geo_cota_ok"),
             f.get("err_rel_qn"), f.get("err_rel_geo"),
@@ -327,7 +340,7 @@ def exportar_xlsx(filas_bf: list, filas_comp: list) -> Path:
     # ── Hoja 2: KQNodes vs KGeoMIP ───────────────────────────────────────────
     ws2 = wb.create_sheet("KQNodes vs KGeoMIP")
     hdrs2 = [
-        "Archivo", "N", "k",
+        "Archivo", "N", "Prueba", "Alcance", "Mecanismo", "k",
         "Φ_KQNodes", "Φ_KGeoMIP",
         "Coinciden", "diff_abs", "err_rel",
         "t_QNodes(s)", "t_KGeoMIP(s)",
@@ -337,7 +350,8 @@ def exportar_xlsx(filas_bf: list, filas_comp: list) -> Path:
 
     for ri, f in enumerate(filas_comp, 2):
         row = [
-            f.get("archivo"), f.get("n"), f.get("k", "libre"),
+            f.get("archivo"), f.get("n"), f.get("prueba"),
+            f.get("alcance"), f.get("mecanismo"), f.get("k", "libre"),
             f.get("phi_qn"), f.get("phi_geo"),
             f.get("coinciden"),
             f.get("diff_abs"), f.get("err_rel"),
@@ -384,84 +398,121 @@ def main() -> None:
     permitir_vacio = (opcion != "2")
     print(f" permitir_presente_vacio = {permitir_vacio}")
 
+    txt_n = input(
+        f"\n ¿Cuántas pruebas (alcance/mecanismo) por archivo? [{N_PRUEBAS_POR_ARCHIVO}]: "
+    ).strip()
+    try:
+        n_pruebas = max(1, int(txt_n)) if txt_n else N_PRUEBAS_POR_ARCHIVO
+    except ValueError:
+        n_pruebas = N_PRUEBAS_POR_ARCHIVO
+    print(f" pruebas por archivo = {n_pruebas} (las posibles si el espacio es menor)")
+
     filas_bf: list   = []
     filas_comp: list = []
 
-    # ── samples_force: BF + QNodes + KGeoMIP por cada k (N ≤ 6) ─────────────
+    # ── samples_force: BF + QNodes + KGeoMIP por (prueba, k) (N ≤ 6) ─────────
     sep("samples_force — BruteForce + KQNodes + KGeoMIP (N ≤ 6)")
 
     for csv_path in archivos_frc:
         tpm, n = cargar_tpm(csv_path)
         nombre = csv_path.name
         estado = "0" * n
-        print(f"\n  [{nombre}]  N={n}")
+        candidato = "1" * n
 
         if n > N_MAX_BF:
-            print(f"    N={n} > {N_MAX_BF} — OMITIDO (la fuerza bruta solo compara N ≤ {N_MAX_BF}).")
+            print(f"\n  [{nombre}]  N={n} > {N_MAX_BF} — OMITIDO (la fuerza bruta solo compara N ≤ {N_MAX_BF}).")
             continue
 
-        # BF una sola vez con k=None → obtiene todos los k de golpe
-        print(f"    BruteForce k=None...", end=" ", flush=True)
-        bf_res = correr_bruta(tpm, n, estado, None, permitir_vacio)
-        print("OK" if bf_res.get("ok") else f"ERROR: {bf_res.get('error','?')}")
+        pruebas = generar_pruebas(n, n_pruebas)
+        k_values = list(range(2, n + 1))
+        print(f"\n  [{nombre}]  N={n}  ·  {len(pruebas)} pruebas  ·  k ∈ {k_values}")
 
-        if not bf_res.get("ok") or not bf_res.get("optimos_por_k"):
-            print(f"    ⚠ BruteForce falló — solo QN vs GEO")
-            procesar_solo_comp(csv_path, tpm, n, nombre, estado,
-                               None, permitir_vacio, filas_comp)
-            continue
+        # 1) BF + QNodes (ambos in-process) por cada prueba.
+        bf_por_prueba: dict  = {}
+        qn_por_prueba: dict  = {}  # (i, k) → resultado QNodes
+        for i, (alcance, mecanismo) in enumerate(pruebas, 1):
+            print(f"    prueba {i:>2}/{len(pruebas)}  alc={alcance} mec={mecanismo}  BF...",
+                  end=" ", flush=True)
+            bf_res = correr_bruta(tpm, n, estado, candidato, alcance, mecanismo,
+                                  None, permitir_vacio)
+            bf_por_prueba[i] = bf_res
+            print("OK" if bf_res.get("ok") else f"ERR({bf_res.get('error','?')})", end="  ", flush=True)
+            print("QN...", end=" ", flush=True)
+            for k in k_values:
+                # alcance.count("1") = n_dims del subsistema; k > n_dims es inválido.
+                if k > alcance.count("1"):
+                    qn_por_prueba[(i, k)] = {"ok": False, "error": f"k={k} > nodos alcance ({alcance.count('1')})"}
+                    continue
+                qn_por_prueba[(i, k)] = correr_qnodes(
+                    tpm, n, estado, candidato, alcance, mecanismo, k, permitir_vacio)
+            print("OK")
 
-        optimos_por_k = bf_res["optimos_por_k"]
+        # 2) KGeoMIP en subproceso, UN arranque por k (solo pruebas con alcance ≥ k bits).
+        geo_por_k: dict = {}
+        for k in k_values:
+            pruebas_k = [(a, m) for a, m in pruebas if a.count("1") >= k]
+            if not pruebas_k:
+                geo_por_k[k] = {}
+                continue
+            print(f"    KGeoMIP lote k={k} ({len(pruebas_k)} pruebas válidas)...", end=" ", flush=True)
+            # El índice de row que devuelve el worker es 1-based sobre pruebas_k,
+            # así que mapeamos de vuelta al índice original de pruebas.
+            idx_map = {j + 1: pruebas.index(p) + 1 for j, p in enumerate(pruebas_k)}
+            raw = correr_geomip_lote(csv_path, n, estado, candidato, k, pruebas_k, permitir_vacio)
+            geo_por_k[k] = {idx_map[j]: v for j, v in raw.items()}
+            print("OK")
 
-        for k_val in sorted(optimos_por_k.keys()):
-            phi_bf = optimos_por_k[k_val]
+        # 3) Ensamblar filas por (prueba, k); omitir si alcance < k nodos.
+        for i, (alcance, mecanismo) in enumerate(pruebas, 1):
+            bf_res = bf_por_prueba[i]
+            optimos = bf_res.get("optimos_por_k", {}) if bf_res.get("ok") else {}
+            for k in k_values:
+                if k > alcance.count("1"):
+                    continue  # subsistema demasiado pequeño para esta k
+                phi_bf = optimos.get(k)
+                qn_res = qn_por_prueba[(i, k)]
+                geo_res = geo_por_k[k].get(i, {"ok": False, "error": "sin dato"})
 
-            print(f"    QNodes  k={k_val}...", end=" ", flush=True)
-            qn_res = correr_qnodes(tpm, n, estado, k_val, permitir_vacio)
-            print("OK" if qn_res.get("ok") else "ERR")
+                phi_qn  = float(qn_res["perdida"])  if qn_res.get("ok")  else None
+                phi_geo = float(geo_res["perdida"]) if geo_res.get("ok") else None
+                t_qn    = round(float(qn_res.get("tiempo", 0)), 4)  if phi_qn  is not None else None
+                t_geo   = round(float(geo_res.get("tiempo", 0)), 4) if phi_geo is not None else None
 
-            print(f"    KGeoMIP k={k_val}...", end=" ", flush=True)
-            geo_res = correr_geomip(csv_path, n, estado, k_val, permitir_vacio)
-            print("OK" if geo_res.get("ok") else "ERR")
+                qn_igual = qn_cota_ok = err_qn = None
+                geo_igual = geo_cota_ok = err_geo = None
+                if phi_bf is not None and phi_qn is not None:
+                    qn_igual, qn_cota_ok, err_qn = comparar_phi(phi_bf, phi_qn)
+                if phi_bf is not None and phi_geo is not None:
+                    geo_igual, geo_cota_ok, err_geo = comparar_phi(phi_bf, phi_geo)
 
-            phi_qn  = float(qn_res["perdida"])  if qn_res.get("ok")  else None
-            phi_geo = float(geo_res["perdida"]) if geo_res.get("ok") else None
-            t_qn    = round(float(qn_res.get("tiempo", 0)), 4)  if phi_qn  is not None else None
-            t_geo   = round(float(geo_res.get("tiempo", 0)), 4) if phi_geo is not None else None
-
-            qn_igual = qn_cota_ok = err_qn = None
-            geo_igual = geo_cota_ok = err_geo = None
-            if phi_qn is not None:
-                qn_igual, qn_cota_ok, err_qn = comparar_phi(phi_bf, phi_qn)
-            if phi_geo is not None:
-                geo_igual, geo_cota_ok, err_geo = comparar_phi(phi_bf, phi_geo)
-
-            filas_bf.append({
-                "archivo": nombre, "n": n, "k": k_val,
-                "phi_bf":  round(phi_bf, 9),
-                "phi_qn":  round(phi_qn, 9)  if phi_qn  is not None else "ERROR",
-                "phi_geo": round(phi_geo, 9) if phi_geo is not None else "ERROR",
-                "qn_cota_ok": qn_cota_ok, "geo_cota_ok": geo_cota_ok,
-                "err_rel_qn": err_qn, "err_rel_geo": err_geo,
-                "phi_igual_qn": qn_igual, "phi_igual_geo": geo_igual,
-                "t_qn": t_qn, "t_geo": t_geo,
-                "nota_qn":  "" if qn_res.get("ok")  else qn_res.get("error", ""),
-                "nota_geo": "" if geo_res.get("ok") else geo_res.get("error", ""),
-            })
-
-            # También en la hoja comparativa
-            if phi_qn is not None and phi_geo is not None:
-                diff_abs = abs(phi_qn - phi_geo)
-                mn = min(phi_qn, phi_geo)
-                filas_comp.append({
-                    "archivo": nombre, "n": n, "k": k_val,
-                    "phi_qn": round(phi_qn, 9), "phi_geo": round(phi_geo, 9),
-                    "coinciden": diff_abs <= TOLERANCIA,
-                    "diff_abs": round(diff_abs, 9),
-                    "err_rel":  round(diff_abs / mn, 9) if mn > TOLERANCIA else 0.0,
+                filas_bf.append({
+                    "archivo": nombre, "n": n, "prueba": i,
+                    "alcance": alcance, "mecanismo": mecanismo, "k": k,
+                    "phi_bf":  round(phi_bf, 9) if phi_bf is not None else "ERROR",
+                    "phi_qn":  round(phi_qn, 9)  if phi_qn  is not None else "ERROR",
+                    "phi_geo": round(phi_geo, 9) if phi_geo is not None else "ERROR",
+                    "qn_cota_ok": qn_cota_ok, "geo_cota_ok": geo_cota_ok,
+                    "err_rel_qn": err_qn, "err_rel_geo": err_geo,
+                    "phi_igual_qn": qn_igual, "phi_igual_geo": geo_igual,
                     "t_qn": t_qn, "t_geo": t_geo,
-                    "nota_qn": "", "nota_geo": "",
+                    "nota_qn":  "" if qn_res.get("ok")  else qn_res.get("error", ""),
+                    "nota_geo": "" if geo_res.get("ok") else geo_res.get("error", ""),
                 })
+
+                # Comparativa QN vs GEO (independiente de la bruta).
+                if phi_qn is not None and phi_geo is not None:
+                    diff_abs = abs(phi_qn - phi_geo)
+                    mn = min(phi_qn, phi_geo)
+                    filas_comp.append({
+                        "archivo": nombre, "n": n, "prueba": i,
+                        "alcance": alcance, "mecanismo": mecanismo, "k": k,
+                        "phi_qn": round(phi_qn, 9), "phi_geo": round(phi_geo, 9),
+                        "coinciden": diff_abs <= TOLERANCIA,
+                        "diff_abs": round(diff_abs, 9),
+                        "err_rel":  round(diff_abs / mn, 9) if mn > TOLERANCIA else 0.0,
+                        "t_qn": t_qn, "t_geo": t_geo,
+                        "nota_qn": "", "nota_geo": "",
+                    })
 
     # ── Resumen por consola ───────────────────────────────────────────────────
     sep("Resumen")
@@ -471,7 +522,7 @@ def main() -> None:
         iguales_geo = sum(1 for f in filas_bf if f.get("phi_igual_geo"))
         fallos_qn   = sum(1 for f in filas_bf if f.get("qn_cota_ok") is False)
         fallos_geo  = sum(1 for f in filas_bf if f.get("geo_cota_ok") is False)
-        print(f"  BF vs Frameworks — {total} combinaciones (archivo × k):")
+        print(f"  BF vs Frameworks — {total} combinaciones (archivo × prueba × k):")
         print(f"    KQNodes  — Φ exacto: {iguales_qn}/{total}   Fallos cota: {fallos_qn}")
         print(f"    KGeoMIP  — Φ exacto: {iguales_geo}/{total}   Fallos cota: {fallos_geo}")
         if fallos_qn or fallos_geo:

@@ -186,6 +186,14 @@ function VivoBloque() {
     return { q: avg(phis(filasQ)), g: avg(phis(filasG)) };
   }, [filasQ, filasG]);
 
+  const tiempos = useMemo(() => {
+    const total = (obj) =>
+      Object.values(obj)
+        .filter((f) => !f.error)
+        .reduce((a, f) => a + (f.tiempo_seg || 0), 0);
+    return { q: total(filasQ), g: total(filasG) };
+  }, [filasQ, filasG]);
+
   return (
     <>
       <div className="card">
@@ -232,7 +240,7 @@ function VivoBloque() {
                   const q = filasQ[num], g = filasG[num];
                   const pq = q && !q.error ? q.perdida : null;
                   const pg = g && !g.error ? g.perdida : null;
-                  const mejor = pq == null || pg == null ? "—" : pq <= pg ? "KQNodes" : "KGeoMIP";
+                  const mejor = pq == null || pg == null ? "—" : pq === pg ? "Ambos" : pq < pg ? "KQNodes" : "KGeoMIP";
                   return (
                     <tr key={num}>
                       <td>{num}</td>
@@ -245,6 +253,14 @@ function VivoBloque() {
                   );
                 })}
               </tbody>
+              <tfoot>
+                <tr>
+                  <td colSpan={3} style={{ textAlign: "right", fontWeight: 600 }}>Tiempo total pruebas</td>
+                  <td>{formatearTiempo(tiempos.q)}</td>
+                  <td>{formatearTiempo(tiempos.g)}</td>
+                  <td>—</td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         </div>

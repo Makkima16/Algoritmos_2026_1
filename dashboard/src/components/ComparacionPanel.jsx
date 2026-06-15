@@ -9,7 +9,7 @@ import { fmt, pct } from "../lib/metrics.js";
 export default function ComparacionPanel({ a, b }) {
   if (!a || !b) return null;
 
-  const mejor = a.phi <= b.phi ? a.label : b.label;
+  const mejor = a.phi == null || b.phi == null ? "—" : a.phi === b.phi ? "Ambos" : a.phi < b.phi ? a.label : b.label;
   const filas = [
     ["Φ (pérdida)", fmt(a.phi), fmt(b.phi), "menor"],
     ["Φ relativa", pct(a.metricas?.perdida_relativa?.phi_relativo), pct(b.metricas?.perdida_relativa?.phi_relativo), "menor"],
@@ -32,7 +32,7 @@ export default function ComparacionPanel({ a, b }) {
         <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
           <h4 style={{ margin: 0 }}>Comparación</h4>
           <span>
-            Mejor Φ: <span className={`pill ${mejor === a.label ? "qnodes" : "geomip"}`}>{mejor}</span>
+            Mejor Φ: <span className={`pill ${mejor === a.label ? "qnodes" : mejor === b.label ? "geomip" : ""}`}>{mejor}</span>
           </span>
         </div>
         <table style={{ marginTop: 10 }}>
