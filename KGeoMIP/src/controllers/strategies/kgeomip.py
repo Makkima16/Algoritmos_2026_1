@@ -211,6 +211,128 @@ def _generar_candidatos_presente_vacio(
     return candidatos
 
 
+# Presupuesto de candidatos de aislamiento a evaluar por k. Acota el número de
+# k-particiones de aislamiento que se evalúan, INDEPENDIENTE de N: cuando hay más
+# átomos de los que caben, se rankean por costo de aislamiento individual y solo se
+# combinan los mejores T (el mayor T con C(T, k-1) ≤ cap). Así el coste extra queda
+# acotado a ~cap evaluaciones EMD baratas para cualquier N y k, mientras se conservan
+# las semillas que cierran la brecha contra KQNodes (validado: k=5/N10, top-12=495
+# candidatos cierra los 5 casos que greedy+1-move perdía).
+CAP_AISLAMIENTO_BLOQUES: int = 500
+
+
+def _candidatos_aislamiento_bloques(
+    subsistema,
+    dist_original: np.ndarray,
+    k: int,
+    permitir_presente_vacio: bool,
+    cap: int = CAP_AISLAMIENTO_BLOQUES,
+) -> "list[list[Block]]":
+    """
+    Genera k-particiones de aislamiento (k-1 átomos + residual) en formato Block.
+
+    Sembrar la búsqueda local desde cortes de aislamiento evita que el greedy
+    top-down quede atrapado en la cuenca del primer corte miope, alcanzando óptimos
+    locales que ni el 1-move ni el 2-move recuperan desde el resultado greedy (es el
+    mecanismo que cierra la brecha contra KQNodes; VNS/ILS no aportan sobre esto).
+
+    Dos familias de átomos:
+      · Futuro aislado:   ({f}, ∅) si se permite mecanismo vacío; ({f}, {f})
+        (simétrico, conserva su propio presente) si NO se permite.
+      · Presente aislado: (∅, {p}) — bloque sin futuro; siempre válido.
+
+    ACOTAMIENTO INDEPENDIENTE DE N: el número total de átomos es ~(futuros+presentes),
+    así que C(átomos, k-1) explota en N grande. Para evitarlo se elige el mayor T tal
+    que C(T, k-1) ≤ cap y, si hay más átomos que T, se rankean por su costo de
+    aislamiento individual (Φ de (átomo, complemento), ~2N evaluaciones baratas) y se
+    combinan solo los mejores T. Resultado: ≤ cap candidatos para CUALQUIER N y k. Si
+    todos los átomos caben (C ≤ cap) se usan todos (idéntico a la enumeración total).
+
+    La cobertura de futuros está garantizada: cada futuro o bien queda aislado en un
+    átomo futuro, o bien permanece en el residual (los átomos presentes NO retiran
+    futuros del residual). Se descartan bloques (∅, ∅) y, si no se permite presente
+    vacío, los bloques con futuro pero sin mecanismo.
+
+    Args:
+        subsistema              : Subsistema condicionado (para rankear átomos por EMD).
+        dist_original           : Distribución marginal original (size N).
+        k                       : Número de bloques objetivo (≥ 2).
+        permitir_presente_vacio : Si False, los átomos futuros conservan su presente.
+        cap                     : Tope de candidatos a generar.
+
+    Returns:
+        Lista de candidatos; cada candidato es una lista de k Blocks (≤ cap entradas).
+    """
+    fut = [int(x) for x in subsistema.indices_ncubos]
+    pre = [int(x) for x in subsistema.dims_ncubos]
+    pre_set = set(pre)
+
+    if permitir_presente_vacio:
+        atomos: "list[Block]" = [(frozenset({f}), frozenset()) for f in fut]
+    else:
+        atomos = [
+            (frozenset({f}), frozenset({f}) if f in pre_set else frozenset())
+            for f in fut
+        ]
+    atomos += [(frozenset(), frozenset({p})) for p in pre]
+
+    fut_all = frozenset(fut)
+    pre_all = frozenset(pre)
+    n_atomos = len(atomos)
+    if k - 1 > n_atomos:
+        return []
+
+    # Mayor T con C(T, k-1) ≤ cap (acota los candidatos sin importar N).
+    T = k - 1
+    while T < n_atomos and comb(T + 1, k - 1) <= cap:
+        T += 1
+
+    if T >= n_atomos:
+        elegidos = atomos
+    else:
+        # Rankear átomos por costo de aislamiento individual (Φ de (átomo, complemento)).
+        costos: "list[float]" = []
+        for fa, pa in atomos:
+            comp_f = fut_all - fa
+            comp_p = pre_all - pa
+            invalido = (
+                (not fa and not pa)
+                or (not comp_f and not comp_p)
+                or (not permitir_presente_vacio and ((fa and not pa) or (comp_f and not comp_p)))
+            )
+            if invalido:
+                costos.append(float("inf"))
+            else:
+                costos.append(
+                    evaluar_bloques(subsistema, [(fa, pa), (comp_f, comp_p)], dist_original)
+                )
+        orden = np.argsort(costos)[:T]
+        elegidos = [atomos[i] for i in orden]
+
+    candidatos: "list[list[Block]]" = []
+    for combo in itertools.combinations(range(len(elegidos)), k - 1):
+        fu: set = set()
+        pu: set = set()
+        bloques: "list[Block]" = []
+        for a in combo:
+            fa, pa = elegidos[a]
+            bloques.append(elegidos[a])
+            fu |= fa
+            pu |= pa
+        res_f = fut_all - fu
+        res_p = pre_all - pu
+        if not res_f and not res_p:
+            continue
+        bloques.append((res_f, res_p))
+        if any(not f and not p for f, p in bloques):
+            continue  # bloque (∅, ∅) inválido
+        if not permitir_presente_vacio and any(f and not p for f, p in bloques):
+            continue  # bloque con futuro sin mecanismo, no permitido
+        candidatos.append(bloques)
+
+    return candidatos
+
+
 def _refinar_particion_local(
     subsistema,
     indices_ncubos: np.ndarray,
@@ -994,7 +1116,7 @@ def _construir_cut_pool(
     all_pre = frozenset(int(x) for x in dims_ncubos)
 
     def _add(eff: frozenset, pre: frozenset) -> None:
-        if not eff:
+        if not eff and not pre:
             return
         key = (eff, pre)
         if key not in seen:
@@ -1006,10 +1128,13 @@ def _construir_cut_pool(
         pre = frozenset([int(dims_ncubos[i])]) if i < len(dims_ncubos) else frozenset()
         _add(eff, pre)
         _add(all_eff - eff, all_pre - pre)
-        # Corte de aislamiento vacío: nodo i sin ningún mecanismo presente.
+        # Corte de aislamiento con mecanismo vacío: nodo i sin presente.
         # Cuando se aplica a bloque B: inside=({i}, ∅), outside=(B−{i}, B.pre).
-        # Equivalente al candidato single-bit de 20263.
         _add(eff, frozenset())
+        # Corte de aislamiento con futuro vacío: presente j aislado sin futuro.
+        # Cuando se aplica a bloque B: inside=(∅, {j}), outside=(B.fut, B.pre−{j}).
+        if i < len(dims_ncubos):
+            _add(frozenset(), frozenset([int(dims_ncubos[i])]))
 
     all_states = np.arange(len(tabla_T), dtype=np.int32)
     for d in range(1, n_dims // 2 + 2):
@@ -1112,9 +1237,10 @@ def _mejor_split_bloques(
         for cut_eff, cut_pre in cut_pool:
             inside: Block = (eff_block & cut_eff, pre_block & cut_pre)
             outside: Block = (eff_block - cut_eff, pre_block - cut_pre)
-            # Invariante: ningún bloque puede quedar con el futuro (alcance) vacío.
-            # Un bloque sin futuro no representa nada y abre la puerta a partes (∅, ∅).
-            if not inside[0] or not outside[0]:
+            # Invariante: ningún bloque puede quedar completamente vacío (∅, ∅).
+            # Un bloque puede tener futuro ∅ (si conserva presente) o presente ∅ (si
+            # conserva futuro), pero no ambos vacíos a la vez.
+            if (not inside[0] and not inside[1]) or (not outside[0] and not outside[1]):
                 continue
             # Si el mecanismo vacío NO está permitido, ningún bloque puede quedar
             # con el presente vacío (cada parte usa el mecanismo de sus nodos).
@@ -1224,15 +1350,16 @@ def _refinar_bloques_1move(
 
         # ── Movimientos futuros ────────────────────────────────────────────
         for i, (eff_i, pre_i) in enumerate(mejor_bloques):
-            if len(eff_i) <= 1:
-                continue  # no vaciar el conjunto futuro del bloque
             for node in eff_i:
+                new_eff_i = eff_i - {node}
+                if not new_eff_i and not pre_i:
+                    continue  # resultaría en bloque (∅, ∅)
                 for j in range(k):
                     if i == j:
                         continue
                     eff_j, pre_j = mejor_bloques[j]
                     cfg = list(mejor_bloques)
-                    cfg[i] = (eff_i - {node}, pre_i)
+                    cfg[i] = (new_eff_i, pre_i)
                     cfg[j] = (eff_j | {node}, pre_j)
                     vecinos.append(cfg)
 
@@ -1243,6 +1370,9 @@ def _refinar_bloques_1move(
         for i, (eff_i, pre_i) in enumerate(mejor_bloques):
             # Si ∅ no está permitido, no vaciar el presente de un bloque.
             if not permitir_presente_vacio and len(pre_i) <= 1:
+                continue
+            # Nunca vaciar el único presente de un bloque con futuro ∅ → resultaría (∅,∅).
+            if not eff_i and len(pre_i) <= 1:
                 continue
             for node in pre_i:
                 for j in range(k):
@@ -1291,7 +1421,7 @@ def _refinar_bloques_2move(
     Un par es inválido si:
       • el segundo movimiento afecta un nodo que el primero ya reubicó
         (detección implícita: el nodo ya no está en el bloque fuente).
-      • algún bloque queda con el futuro vacío.
+      • algún bloque queda con futuro y presente vacíos a la vez (∅, ∅).
 
     Returns:
         (perdida, bloques, mejoro) — mejoro=True si se encontró un par que mejora.
@@ -1301,14 +1431,17 @@ def _refinar_bloques_2move(
     # Generar todos los movimientos 1-move válidos
     movimientos: list = []
     for i, (eff_i, pre_i) in enumerate(bloques):
-        if len(eff_i) > 1:
-            for nodo in sorted(eff_i):
-                for j in range(k):
-                    if j != i:
-                        movimientos.append(("f", i, j, nodo))
+        for nodo in sorted(eff_i):
+            if not (eff_i - {nodo}) and not pre_i:
+                continue  # resultaría en (∅, ∅)
+            for j in range(k):
+                if j != i:
+                    movimientos.append(("f", i, j, nodo))
+        if not permitir_presente_vacio and len(pre_i) <= 1:
+            continue
+        if not eff_i and len(pre_i) <= 1:
+            continue  # evitar (∅, ∅): bloque con futuro ∅ y único presente
         for nodo in sorted(pre_i):
-            if not permitir_presente_vacio and len(pre_i) <= 1:
-                break
             for j in range(k):
                 if j != i:
                     movimientos.append(("p", i, j, nodo))
@@ -1339,8 +1472,10 @@ def _refinar_bloques_2move(
             eff_ib, pre_ib = bl_b[i_b]
             eff_jb, pre_jb = bl_b[j_b]
             if tipo_b == "f":
-                if nodo_b not in eff_ib or len(eff_ib) <= 1:
+                if nodo_b not in eff_ib:
                     continue
+                if not (eff_ib - {nodo_b}) and not pre_ib:
+                    continue  # resultaría en (∅, ∅)
                 bl_b[i_b] = (eff_ib - {nodo_b}, pre_ib)
                 bl_b[j_b] = (eff_jb | {nodo_b}, pre_jb)
             else:
@@ -1351,7 +1486,7 @@ def _refinar_bloques_2move(
                 bl_b[i_b] = (eff_ib, pre_ib - {nodo_b})
                 bl_b[j_b] = (eff_jb, pre_jb | {nodo_b})
 
-            if any(not eff for eff, _ in bl_b):
+            if any(not eff and not pre for eff, pre in bl_b):
                 continue
             configs.append(bl_b)
 
@@ -1383,7 +1518,7 @@ def _perturbacion_bloques(
     Perturba una k-partición de bloques asimétricos moviendo aleatoriamente
     nodos futuros y presentes entre bloques.
 
-    Garantiza que ningún bloque quede con el futuro vacío (invariante crítico).
+    Garantiza que ningún bloque quede completamente vacío (∅, ∅).
     Los movimientos futuros y presentes son independientes (asimetría).
     """
     rng = _random_module.Random(semilla)
@@ -1393,7 +1528,10 @@ def _perturbacion_bloques(
 
     for _ in range(n_movimientos):
         # Mover un nodo futuro entre bloques
-        candidatos_orig = [i for i, f in enumerate(fut_listas) if len(f) > 1]
+        candidatos_orig = [
+            i for i, (f, p) in enumerate(zip(fut_listas, pre_listas))
+            if len(f) >= 1 and (len(f) > 1 or len(p) > 0)
+        ]
         if candidatos_orig:
             i = rng.choice(candidatos_orig)
             nodo = rng.choice(fut_listas[i])
@@ -1403,7 +1541,11 @@ def _perturbacion_bloques(
 
         # Mover un nodo presente entre bloques (independiente del futuro)
         if permitir_presente_vacio:
-            candidatos_pre = [i for i, p in enumerate(pre_listas) if len(p) > 0]
+            # Excluir bloques con futuro ∅ y un solo presente: quedarían (∅, ∅).
+            candidatos_pre = [
+                i for i, (f, p) in enumerate(zip(fut_listas, pre_listas))
+                if len(p) > 0 and (len(f) > 0 or len(p) > 1)
+            ]
         else:
             candidatos_pre = [i for i, p in enumerate(pre_listas) if len(p) > 1]
         if candidatos_pre:
@@ -1564,26 +1706,44 @@ def _resolver_exacto_geomip(
     for kk in ks:
         mejor_phi = float("inf")
         mejor_bloques: Optional[list] = None
-        for part_fut in _particiones_en_k(futuros, kk):
-            bloques_fut = [frozenset(int(idx[p]) for p in b) for b in part_fut]
-            if n_dims == 0:
-                bloques = [(bloques_fut[i], frozenset()) for i in range(kk)]
-                phi = evaluar_bloques(subsistema, bloques, dist_original)
-                if phi < mejor_phi:
-                    mejor_phi, mejor_bloques = phi, bloques
-                continue
-            for asignacion in itertools.product(range(kk), repeat=n_dims):
-                pre_sets: list[list[int]] = [[] for _ in range(kk)]
-                for pos_pre, b_idx in enumerate(asignacion):
-                    pre_sets[b_idx].append(int(dims[pos_pre]))
-                if not permitir_vacio and any(len(s) == 0 for s in pre_sets):
+
+        # j = número de bloques con futuro no vacío (j=kk: caso original).
+        # j < kk: bloques j..kk-1 tienen futuro ∅ (deben conservar ≥1 presente).
+        for j in range(1, kk + 1):
+            iters_j = _stirling2(n_vars, j) * (kk ** n_dims)
+            if iters_j > _KGEOMIP_CAP_EXACTO or _stirling2(n_vars, j) == 0:
+                continue  # demasiado costoso o imposible para este j
+
+            for part_fut in _particiones_en_k(futuros, j):
+                bloques_fut = [frozenset(int(idx[p]) for p in b) for b in part_fut]
+                # Rellenar bloques j..kk-1 con futuro vacío
+                bloques_fut += [frozenset()] * (kk - j)
+
+                if n_dims == 0:
+                    if j < kk:
+                        continue  # bloques sin futuro necesitan presente; n_dims=0 imposible
+                    bloques = [(bloques_fut[i], frozenset()) for i in range(kk)]
+                    phi = evaluar_bloques(subsistema, bloques, dist_original)
+                    if phi < mejor_phi:
+                        mejor_phi, mejor_bloques = phi, bloques
                     continue
-                bloques = [
-                    (bloques_fut[i], frozenset(pre_sets[i])) for i in range(kk)
-                ]
-                phi = evaluar_bloques(subsistema, bloques, dist_original)
-                if phi < mejor_phi:
-                    mejor_phi, mejor_bloques = phi, bloques
+
+                for asignacion in itertools.product(range(kk), repeat=n_dims):
+                    pre_sets: list[list[int]] = [[] for _ in range(kk)]
+                    for pos_pre, b_idx in enumerate(asignacion):
+                        pre_sets[b_idx].append(int(dims[pos_pre]))
+                    # Descartar bloques (∅, ∅)
+                    if any(not bloques_fut[i] and not pre_sets[i] for i in range(kk)):
+                        continue
+                    if not permitir_vacio and any(len(s) == 0 for s in pre_sets):
+                        continue
+                    bloques = [
+                        (bloques_fut[i], frozenset(pre_sets[i])) for i in range(kk)
+                    ]
+                    phi = evaluar_bloques(subsistema, bloques, dist_original)
+                    if phi < mejor_phi:
+                        mejor_phi, mejor_bloques = phi, bloques
+
         if mejor_bloques is not None:
             mejor_por_k[kk] = (mejor_phi, mejor_bloques)
 
@@ -1777,6 +1937,46 @@ class KGeoMIP(SIA):
                     self.logger.critic(
                         f"  +1-move K={test_k} perdida={perdida_k:.6f}"
                     )
+
+                    # ── Siembra por candidatos de aislamiento (determinista) ──
+                    # El greedy top-down es miope en el primer corte y cae en
+                    # cuencas peores que ni el 1-move ni el 2-move recuperan. Se
+                    # generan k-particiones de aislamiento (k-1 átomos + residual),
+                    # se evalúan en paralelo (EMD barato) y se refina solo la mejor;
+                    # se conserva si bate al greedy+1-move. Es el mecanismo que cierra
+                    # la brecha contra KQNodes en el régimen permitir_presente_vacio
+                    # (caso N10A k=3: 0.017578 → 0.011719). Acotado por
+                    # CAP_AISLAMIENTO_BLOQUES para que el tiempo no se dispare en k alto.
+                    cands_ais = _candidatos_aislamiento_bloques(
+                        self.sia_subsistema,
+                        self.sia_dists_marginales,
+                        test_k,
+                        permitir_presente_vacio,
+                    )
+                    if cands_ais:
+                        perdidas_ais = Parallel(
+                            n_jobs=min(len(cands_ais), N_JOBS_INTERNOS),
+                            prefer="threads",
+                        )(
+                            delayed(evaluar_bloques)(
+                                self.sia_subsistema, c, self.sia_dists_marginales
+                            )
+                            for c in cands_ais
+                        )
+                        idx_ais = int(np.argmin(perdidas_ais))
+                        perdida_ref, bloques_ref = _refinar_bloques_1move(
+                            self.sia_subsistema,
+                            self.sia_dists_marginales,
+                            cands_ais[idx_ais],
+                            n_jobs=N_JOBS_INTERNOS,
+                            permitir_presente_vacio=permitir_presente_vacio,
+                        )
+                        if perdida_ref < perdida_k - 1e-9:
+                            perdida_k, bloques_k = perdida_ref, bloques_ref
+                            self.logger.critic(
+                                f"  +aislamiento K={test_k} mejoró → {perdida_k:.6f} "
+                                f"({len(cands_ais)} cand.)"
+                            )
 
                     # ── VNS: ciclos 2-move + 1-move hasta convergencia ────────
                     # Escapa de mínimos locales 1-move evaluando pares de
@@ -2214,7 +2414,7 @@ class KGeoMIP(SIA):
 
             # Emit both the primary side and its complement as separate candidates.
             for fs, ps in [(future_side, present_side), (future_other, present_other)]:
-                if not fs:   # future side must be non-empty for a valid block
+                if not fs and not ps:  # descartar cortes (∅, ∅)
                     continue
                 key = (tuple(sorted(fs)), tuple(sorted(ps)))
                 if key not in seen:

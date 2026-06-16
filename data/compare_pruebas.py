@@ -387,9 +387,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="Benchmark KGeoMIP vs KQNodes con las Pruebas de AYDA 2026-1."
     )
-    ap.add_argument("--nets", default="N10,N15,N20",
-                    help="Redes separadas por coma (ej. N10,N15,N20). Por defecto: N10,N15,N20.")
-    ap.add_argument("--ks", default="2,3",
+    ap.add_argument("--nets", default="N10,N15,N20,N22",
+                    help="Redes separadas por coma (ej. N10,N15,N20,N22). Por defecto: N10,N15,N20,N22.")
+    ap.add_argument("--ks", default="3,4,5",
                     help="Valores de k separados por coma. Por defecto: 2,3.")
     ap.add_argument("--max-pruebas", type=int, default=None,
                     help="Máximo de pruebas por red. Por defecto: todas.")

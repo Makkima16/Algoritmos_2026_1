@@ -88,10 +88,9 @@ El motor principal de `aplicar_estrategia` es greedy top-down sobre estos bloque
 Cada split evalúa `inside = (b.fut ∩ c.fut, b.pre ∩ c.pre)` y
 `outside = (b.fut − c.fut, b.pre − c.pre)`, eligiendo el de menor Φ. El corte de
 **mecanismo vacío** `({i}, ∅)` deja que el nodo i siga condicionando causalmente al
-resto, sin penalización falsa. **Invariante (2026-06-12):** ningún bloque puede quedar
-con el **futuro vacío** (lo que eliminaba partes degeneradas `(∅, ∅)`); y si
-`permitir_presente_vacio = False`, tampoco con el **presente vacío** (el flag se respeta
-en split y refinamiento).
+resto, sin penalización falsa. **Invariante (2026-06-15):** ningún bloque puede ser `(∅, ∅)` — tanto el futuro ∅ como
+el presente ∅ son válidos por separado. Si `permitir_presente_vacio = False`, tampoco
+con el **presente vacío** (el flag se respeta en split y refinamiento).
 
 ### Impacto
 
@@ -186,8 +185,9 @@ no satura el bus de memoria y maximiza el rendimiento por tarea.
 El refinamiento 1-move explora **dos** tipos de movimiento, el segundo exclusivo de la
 representación asimétrica:
 
-- **Movimiento futuro:** traslada un nodo futuro del bloque i al j (sin vaciar el futuro
-  del bloque origen).
+- **Movimiento futuro:** traslada un nodo futuro del bloque i al j. Si al sacarlo el
+  bloque i quedara `(∅, ∅)` el movimiento se descarta; si queda `(∅, pre)` con `pre ≠ ∅`
+  es válido.
 - **Movimiento presente (asimétrico):** traslada un nodo del lado presente sin tocar
   su par futuro — imposible en cortes simétricos. Si `permitir_presente_vacio = False`,
   no se permite vaciar el presente de un bloque.
@@ -327,6 +327,20 @@ primera prueba. La fila **"Arranque del motor (warmup)"** contabiliza solo ese a
 El arranque se reporta aparte como "Arranque del motor (warmup)" en el XLSX / SSE del
 dashboard. En la comparación del dashboard, empate de Φ → **"Ambos"**.
 
+### Suite por subprocesos (`data/_worker_motor.py`)
+
+> **Cambio (2026-06-16):** el worker que usan `run_suite_2026.py` y `compare_pruebas.py`
+> no replicaba el arranque del modo bloque: creaba el motor pero **no** llamaba a
+> `warmup_motor()` ni pre-cacheaba el candidato. Como resultado, el **condicionado del
+> candidato** (un `System(tpm, estado).condicionar(...)`, O(N·2^N), varios segundos en N
+> grande) se pagaba dentro de la **primera prueba** del lote y la inflaba (~14 s vs ~5 s
+> las siguientes en N20/k3). Ahora, en el boot del subproceso `geomip`, el worker ejecuta
+> `warmup_motor()` y pre-cachea el candidato en `_CANDIDATO_CACHE` con la misma clave
+> `(id(tpm), estado, condicion)` que usa `sia_preparar_subsistema`, así la primera prueba
+> lo reutiliza. La primera prueba queda al nivel de las demás y ese costo único se
+> contabiliza como arranque. **Φ idéntico** (solo se adelanta un cálculo cacheable). N > 20
+> (ruta de EMD por muestreo) puede conservar un residual menor en la prueba 1.
+
 **Implicación:** en lotes grandes el arranque se amortiza y GeoMIP es competitivo
 en tiempo total. Para pruebas sueltas o k=2, QNodes (sin arranque costoso, exacto para
 k=2 vía Queyranne) es preferible.
@@ -439,6 +453,7 @@ el caché). Esto elimina la degradación progresiva del modo bloque / dashboard 
 | Desactivar VNS 2-move (2026-06-14) | Quita el término O(M²); 3–4× la búsqueda | ⭐⭐ | — (Φ idéntico) |
 | **Eliminar matriz de afinidad (2026-06-14)** | Quita ~20 s de arranque y ~13 GB de RAM, en TODO N | ⭐⭐⭐ | — (Φ idéntico) |
 | **`prob_T` sin doble copia (2026-06-14)** | −~3.35 GB de RAM pico en N25 | ⭐ | — (Φ idéntico) |
+| **Arranque del worker del suite (2026-06-16)** | warmup + pre-caché del candidato en el boot; saca el condicionado (~9 s en N20) de la prueba 1 | ⭐ | — (Φ idéntico) |
 | LazyTPM (N ≥ 18) | Evita Out-of-Memory | — | — (habilita N grande) |
 
 Las dos primeras filas son las que hacen a GeoMIP simultáneamente más rápido **y** más

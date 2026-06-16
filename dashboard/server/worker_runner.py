@@ -123,7 +123,7 @@ elif ALGO == "geomip":
         from src.models.base.application import aplicacion
         from src.controllers.manager import Manager
         from src.controllers.strategies.kgeomip import KGeoMIP
-        from src.lazy_tpm import cargar_tpm as _cargar_tpm_geomip
+        from src.models.core.lazy_tpm import cargar_tpm as _cargar_tpm_geomip
         try:
             aplicacion.desactivar_profiling()
         except Exception:

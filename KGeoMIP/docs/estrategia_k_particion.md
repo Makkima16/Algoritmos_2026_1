@@ -77,15 +77,16 @@ outside = (b.F − c.F,  b.P − c.P)
 Se evalúa Φ (`evaluar_bloques`) de cada configuración candidata en paralelo (joblib) y
 se elige el split de menor pérdida.
 
-**Invariantes de validez de un split (2026-06-12):**
+**Invariantes de validez de un split (2026-06-15):**
 
-- **Ningún bloque puede quedar con el futuro (alcance) vacío** — `inside.F` y `outside.F`
-  deben ser no vacíos. Un bloque sin futuro no representa nada y abría la puerta a partes
-  degeneradas `(∅, ∅)` (futuro **y** presente vacíos), que ahora son imposibles.
+- **Ningún bloque puede quedar completamente vacío `(∅, ∅)`** — un bloque puede tener
+  futuro ∅ (si conserva al menos un presente) o presente ∅ (si conserva al menos un
+  futuro), pero no ambos vacíos a la vez. La condición de descarte es
+  `(not inside.F and not inside.P) or (not outside.F and not outside.P)`.
 - Si `permitir_presente_vacio = False`, además **ningún bloque puede quedar con el
   presente (mecanismo) vacío** — el flag se respeta en todo el camino greedy (split,
-  refinamiento 1-move y, antes, la perturbación). Con `True`, el presente ∅ sí se
-  permite, pero el futuro nunca queda vacío.
+  refinamiento 1-move y la perturbación). Con `True`, tanto el presente ∅ como el
+  futuro ∅ están permitidos (siempre que el otro lado no también sea ∅).
 
 ---
 
@@ -116,8 +117,9 @@ pérdida de precisión y **sin límite de tamaño**. (Detalle en `GeoMIP_Optimiz
 
 `_refinar_bloques_1move` explora dos vecindarios hasta convergencia:
 
-- **Movimiento futuro:** traslada un nodo futuro del bloque i al j (no vacía el futuro
-  del bloque origen).
+- **Movimiento futuro:** traslada un nodo futuro del bloque i al j. Si al sacarlo el
+  bloque i quedara `(∅, ∅)` el movimiento se descarta; si queda `(∅, pre)` con `pre ≠ ∅`
+  es válido.
 - **Movimiento presente (asimétrico):** traslada un nodo del lado presente sin tocar su
   par futuro — imposible en cortes simétricos. Si `permitir_presente_vacio = False`, no
   se permite vaciar el presente de un bloque.

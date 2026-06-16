@@ -139,6 +139,17 @@ las pérdidas de KGeoMIP se inflan por sobre-corte). Por cada N/motor/k escribe,
 de las pruebas, el Σ del tiempo de búsqueda y —justo debajo— el tiempo de arranque
 del motor (warmup). El original NO se modifica.
 
+> **Cambio (2026-06-16):** el worker del suite (`data/_worker_motor.py`), que usan
+> tanto `run_suite_2026.py` como `compare_pruebas.py`, ahora replica el arranque del
+> modo bloque para el motor `geomip`: en el boot del subproceso ejecuta `warmup_motor()`
+> (Numba JIT + pool) **y** pre-cachea el candidato condicionado (`System(tpm, estado)
+> .condicionar(...)` en `_CANDIDATO_CACHE`). Antes ese condicionado del candidato —
+> O(N·2^N), varios segundos en N grande— caía sobre la **primera prueba** del lote
+> inflándola (~14 s vs ~5 s las demás en N20/k3); ahora se contabiliza en el arranque
+> y la primera prueba queda al nivel del resto. **No cambia ninguna pérdida** (solo
+> adelanta un cálculo que de todas formas se cacheaba). N > 20 usa la ruta de EMD por
+> muestreo y puede conservar un residual menor en la prueba 1.
+
 **Dashboard GUI (`dashboard/`, React + FastAPI):**
 ```bash
 .venv/Scripts/python.exe -m uvicorn main:app --app-dir dashboard/server --port 8000

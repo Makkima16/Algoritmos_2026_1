@@ -76,7 +76,7 @@ motor es además **determinista** (se retiró la ILS — ver sección 9 y
 Sin refinamiento: la primera partición era la final.
 
 ### Actual
-- **1-move futuro:** mover un nodo futuro entre bloques (sin vaciar el futuro del origen).
+- **1-move futuro:** mover un nodo futuro entre bloques (el bloque origen puede quedar con futuro ∅ si conserva presente).
 - **1-move presente (asimétrico):** mover el mecanismo de un nodo sin tocar su futuro.
 
 > **Nota (2026-06-12):** antes existía una fase de **ILS** (perturbación +
@@ -117,8 +117,9 @@ con el centinela `-1`. Sin penalización falsa.
 
 El comportamiento está controlado por `permitir_presente_vacio` y ahora se **respeta en
 todo el camino greedy** (split, refinamiento): con `False`, ningún bloque puede quedar
-con presente ∅; con `True`, sí. En ningún caso un bloque puede quedar con el **futuro
-vacío**, lo que elimina partes degeneradas `(∅, ∅)`. Ver sección 9.
+con presente ∅; con `True`, sí. El único invariante absoluto es que ningún bloque puede
+ser `(∅, ∅)` — tanto el futuro ∅ como el presente ∅ son válidos por separado
+(actualización 2026-06-15). Ver sección 9.
 
 ---
 
@@ -213,12 +214,12 @@ N=22 es contingente; no hay garantía de que GeoMIP lo alcance siempre.
 
 Tres cambios al motor greedy top-down de `KGeoMIP`:
 
-1. **Bug `(∅, ∅)` corregido — invariante de futuro no vacío.**
-   `_mejor_split_bloques` permitía crear un bloque con el **futuro vacío** `(∅, presente)`;
-   el movimiento presente del refinamiento podía luego vaciar también su presente,
-   produciendo una parte degenerada `(∅, ∅)` (alcance **y** mecanismo vacíos) que bajaba Φ
-   artificialmente. Ahora **ningún split puede dejar un bloque sin futuro**, lo que vuelve
-   imposible el `(∅, ∅)`.
+1. **Bug `(∅, ∅)` corregido — invariante de no-vacío total.**
+   `_mejor_split_bloques` permitía crear un bloque `(∅, presente)` que el refinamiento
+   posterior podía vaciar por completo, produciendo una parte degenerada `(∅, ∅)` que
+   bajaba Φ artificialmente. Ahora el único invariante es **ningún bloque puede ser `(∅, ∅)`
+   simultáneamente** — tanto el futuro ∅ como el presente ∅ son válidos por separado
+   (actualización 2026-06-15; antes el futuro ∅ también estaba prohibido).
 
 2. **Flag `permitir_presente_vacio` respetado en el camino greedy.**
    El flag estaba conectado a la firma de `aplicar_estrategia` pero **no se propagaba** al

@@ -35,8 +35,8 @@ def fmt_biparticion_fuerza_bruta(
     width_dual = max(len(purv_dual), len(mech_dual)) + BASE_TWO
 
     return (
-        f"⎛{purv_prim:^{width_prim}}⎞⎛{purv_dual:^{width_dual}}⎞\n"
-        f"⎝{mech_prim:^{width_prim}}⎠⎝{mech_dual:^{width_dual}}⎠\n"
+        f"|{purv_prim:^{width_prim}}||{purv_dual:^{width_dual}}|\n"
+        f"|{mech_prim:^{width_prim}}||{mech_dual:^{width_dual}}|\n"
     )
 
 
@@ -98,7 +98,7 @@ def fmt_k_particion_dp(
         str_pres = str_pres if str_pres else VOID_STR
 
         ancho = max(len(str_fut), len(str_pres)) + BASE_TWO
-        partes_fmt.append((f"⎛{str_fut:^{ancho}}⎞", f"⎝{str_pres:^{ancho}}⎠"))
+        partes_fmt.append((f"|{str_fut:^{ancho}}|", f"|{str_pres:^{ancho}}|"))
 
     linea_top = "".join(t for t, _ in partes_fmt)
     linea_bot = "".join(b for _, b in partes_fmt)
@@ -137,7 +137,7 @@ def fmt_k_bloques(
         str_pres = COLON_DELIM.join(LOWER_ABECEDARY[idx] for idx in idxs_pre) or VOID_STR
 
         ancho = max(len(str_fut), len(str_pres)) + BASE_TWO
-        partes_fmt.append((f"⎛{str_fut:^{ancho}}⎞", f"⎝{str_pres:^{ancho}}⎠"))
+        partes_fmt.append((f"|{str_fut:^{ancho}}|", f"|{str_pres:^{ancho}}|"))
 
     linea_top = "".join(t for t, _ in partes_fmt)
     linea_bot = "".join(b for _, b in partes_fmt)
@@ -159,4 +159,4 @@ def fmt_parte_q(
     str_mech = COLON_DELIM.join(mech) if mech else VOID_STR
     width = max(len(str_purv), len(str_mech)) + 2
 
-    return f"⎛{str_purv:^{width}}⎞", f"⎝{str_mech:^{width}}⎠"
+    return f"|{str_purv:^{width}}|", f"|{str_mech:^{width}}|"

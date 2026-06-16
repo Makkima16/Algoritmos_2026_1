@@ -76,11 +76,11 @@ Muestra de 8 pruebas de `data_scripts/Pruebas/Pruebas_N10.csv`, TPM `N10A`, k=3,
 | Tiempo total (8 casos) | **2.59 s** |
 | Tiempo promedio por caso | **0.324 s** |
 | Particiones degeneradas (∅,∅) | 0 |
-| Bloques con futuro vacío | 0 |
+| Bloques (∅, ∅) degenerados | 0 |
 
-Todas las particiones resultantes son válidas (cada bloque conserva ≥1 nodo futuro;
-el presente vacío solo aparece cuando `permitir_presente_vacio=True`). La calidad de
-Φ se mantiene equivalente a la del pipeline con ILS, a una fracción del tiempo.
+Todas las particiones resultantes son válidas (ningún bloque tiene futuro y presente
+vacíos simultáneamente; tanto futuro ∅ como presente ∅ son permitidos por separado).
+La calidad de Φ se mantiene equivalente a la del pipeline con ILS, a una fracción del tiempo.
 
 ---
 
@@ -95,7 +95,7 @@ constante de bucle = 0**, no eliminadas:
 - `_refinar_bloques_2move` (VNS) + bucle `N_VNS_MAX = 0` en `aplicar_estrategia`.
 - `_perturbacion_bloques` (ILS ligero) + bucle `N_ILS_LIGHT = 0` en `aplicar_estrategia`.
 - El refinamiento 1-move (`_refinar_bloques_1move`) y el invariante de no generar
-  bloques con futuro vacío permanecen intactos como única fase de mejora activa.
+  bloques `(∅, ∅)` permanecen como única fase de mejora activa.
 
 > Reactivar cualquiera es subir su constante (`N_VNS_MAX` / `N_ILS_LIGHT`) a > 0; el ILS
 > ligero ya usa semilla fija, así que conserva el determinismo si se reactiva.

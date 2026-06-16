@@ -39,7 +39,7 @@ from src.controllers.manager import Manager
 from src.controllers.strategies.kgeomip import KGeoMIP
 from src.controllers.strategies.kgeomip import _serializar_particion, warmup_motor
 from src.funcs.base import ABECEDARY
-from src.lazy_tpm import cargar_tpm
+from src.models.core.lazy_tpm import cargar_tpm
 
 GEOMIP_ROOT   = Path(__file__).resolve().parent
 # Los datasets/TPMs y CSV de pruebas viven en la carpeta data/ de la RAÍZ del
