@@ -110,9 +110,10 @@ k del descenso.
 > **Cambio (2026-06-12):** la familia 3 ahora se genera **solo si**
 > `permitir_presente_vacio = True`. Antes el corte `({i}, ∅)` se añadía siempre, de modo
 > que el flag no tenía efecto y el mecanismo vacío aparecía aunque se pidiera `False`.
-> Con el flag en `False`, el pool ya no contiene cortes de mecanismo vacío. (El invariante
-> de `_add`, `if not eff: return`, garantiza además que **ningún corte tenga el futuro
-> vacío** → QNodes nunca produce partes `(∅, ∅)`.)
+> Con el flag en `False`, el pool ya no contiene cortes de mecanismo vacío. El invariante
+> de `_add` es ahora `if not eff and not pre: return` — se descartan únicamente cortes
+> `(∅, ∅)`. Los cortes `(∅, {j})` (futuro vacío con presente) sí se añaden al pool,
+> permitiendo bloques con futuro ∅ siempre que conserven al menos un presente.
 
 ---
 
@@ -127,8 +128,8 @@ inside  = (b.fut ∩ c.fut,  b.pre ∩ c.pre)
 outside = (b.fut − c.fut,  b.pre − c.pre)
 ```
 
-Se exige que **ambos** lados conserven al menos un futuro (partición limpia de los N
-nodos futuros); el presente puede quedar asimétrico o vacío. Se elige el split con
+Se exige que ningún lado sea `(∅, ∅)` — tanto el futuro ∅ como el presente ∅ están
+permitidos siempre que el otro lado no esté también vacío. Se elige el split con
 menor Φ (`_emd_bloques`).
 
 ### 6.2 k especificado (`_greedy_bloques`)
@@ -157,8 +158,8 @@ Como cada k surge de dividir un bloque del nivel anterior, la jerarquía es **an
 En cada ronda evalúa TODOS los vecinos y aplica el globalmente mejor. Hay dos tipos de
 movimiento:
 
-- **Movimiento futuro:** traslada un nodo futuro del bloque i al j (sin vaciar el
-  futuro de i).
+- **Movimiento futuro:** traslada un nodo futuro del bloque i al j. Si al sacarlo el
+  bloque i quedara `(∅, ∅)` el movimiento se descarta; si queda `(∅, pre)` es válido.
 - **Movimiento presente (asimétrico):** traslada el **mecanismo** de un nodo del
   bloque i al j **sin** mover su futuro — exclusivo del esquema asimétrico.
 

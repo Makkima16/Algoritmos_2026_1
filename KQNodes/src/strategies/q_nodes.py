@@ -277,26 +277,45 @@ class QNodes(SIA):
         for kk in ks:
             mejor_phi = float("inf")
             mejor_bloques: Optional[list] = None
-            for part_fut in particiones_en_k(futuros, kk):
-                bloques_fut = [frozenset(b) for b in part_fut]
-                if self._n_dims == 0:
-                    bloques = [(bloques_fut[i], frozenset()) for i in range(kk)]
-                    phi = self._emd_bloques(bloques)
-                    if phi < mejor_phi:
-                        mejor_phi, mejor_bloques = phi, bloques
-                    continue
-                for asignacion in product(range(kk), repeat=self._n_dims):
-                    pre_sets: list[list[int]] = [[] for _ in range(kk)]
-                    for pos_pre, b_idx in enumerate(asignacion):
-                        pre_sets[b_idx].append(pos_pre)
-                    if not permitir_vacio and any(len(s) == 0 for s in pre_sets):
+
+            # j = número de bloques con futuro no vacío (j=kk: caso original).
+            # j < kk: bloques j..kk-1 tienen futuro ∅ (deben conservar ≥1 presente).
+            for j in range(1, kk + 1):
+                s_n_j = self._stirling2(self._N, j)
+                iters_j = s_n_j * (kk ** self._n_dims)
+                if iters_j > _CAP_EXACTO or s_n_j == 0:
+                    continue  # demasiado costoso o imposible para este j
+
+                for part_fut in particiones_en_k(futuros, j):
+                    bloques_fut = [frozenset(b) for b in part_fut]
+                    # Rellenar bloques j..kk-1 con futuro vacío
+                    bloques_fut += [frozenset()] * (kk - j)
+
+                    if self._n_dims == 0:
+                        if j < kk:
+                            continue  # bloques sin futuro necesitan presente; n_dims=0 imposible
+                        bloques = [(bloques_fut[i], frozenset()) for i in range(kk)]
+                        phi = self._emd_bloques(bloques)
+                        if phi < mejor_phi:
+                            mejor_phi, mejor_bloques = phi, bloques
                         continue
-                    bloques = [
-                        (bloques_fut[i], frozenset(pre_sets[i])) for i in range(kk)
-                    ]
-                    phi = self._emd_bloques(bloques)
-                    if phi < mejor_phi:
-                        mejor_phi, mejor_bloques = phi, bloques
+
+                    for asignacion in product(range(kk), repeat=self._n_dims):
+                        pre_sets: list[list[int]] = [[] for _ in range(kk)]
+                        for pos_pre, b_idx in enumerate(asignacion):
+                            pre_sets[b_idx].append(pos_pre)
+                        # Descartar bloques (∅, ∅)
+                        if any(not bloques_fut[i] and not pre_sets[i] for i in range(kk)):
+                            continue
+                        if not permitir_vacio and any(len(s) == 0 for s in pre_sets):
+                            continue
+                        bloques = [
+                            (bloques_fut[i], frozenset(pre_sets[i])) for i in range(kk)
+                        ]
+                        phi = self._emd_bloques(bloques)
+                        if phi < mejor_phi:
+                            mejor_phi, mejor_bloques = phi, bloques
+
             if mejor_bloques is not None:
                 mejor_por_k[kk] = (mejor_phi, mejor_bloques)
 
@@ -396,7 +415,7 @@ class QNodes(SIA):
         vistos: set = set()
 
         def _add(eff: frozenset, pre: frozenset) -> None:
-            if not eff:
+            if not eff and not pre:
                 return
             clave = (eff, pre)
             if clave not in vistos:
@@ -410,6 +429,10 @@ class QNodes(SIA):
             _add(all_fut - eff, all_pre - pre)
             if self._permitir_presente_vacio:
                 _add(eff, frozenset())  # corte de mecanismo vacío (solo si se permite)
+            # Corte de futuro vacío: presente j aislado sin futuro.
+            # Cuando se aplica a bloque B: inside=(∅, {j}), outside=(B.fut, B.pre−{j}).
+            if i < self._n_dims:
+                _add(frozenset(), frozenset((i,)))
 
         return pool
 
@@ -496,9 +519,9 @@ class QNodes(SIA):
             comp_fut = all_fut - s_fut
             comp_pre = all_pre - s_pre
             partes: list = []
-            if s_fut:
+            if s_fut or s_pre:  # bloque válido: no (∅, ∅)
                 partes.append((s_fut, s_pre))
-            if comp_fut:
+            if comp_fut or comp_pre:  # complemento válido: no (∅, ∅)
                 partes.append((comp_fut, comp_pre))
             if len(partes) < 2:
                 return float("inf")
@@ -535,20 +558,14 @@ class QNodes(SIA):
                 deltas.pop(mejor_k)
 
             pendant_fut, pendant_pre = deltas[0]
-            if pendant_fut:
-                candidatos[(pendant_fut, pendant_pre)] = _f(pendant_fut, pendant_pre)
-            else:
-                # Átomo presente-only (modo asimétrico): registrar complemento.
-                comp_fut = all_fut - pendant_fut
-                comp_pre = all_pre - pendant_pre
-                if comp_fut:
-                    candidatos[(comp_fut, comp_pre)] = _f(comp_fut, comp_pre)
+            # Registrar el par colgante directamente; _f ya soporta futuro ∅.
+            candidatos[(pendant_fut, pendant_pre)] = _f(pendant_fut, pendant_pre)
 
             omegas[-1] = (omegas[-1][0] | pendant_fut, omegas[-1][1] | pendant_pre)
             fase_atomos = omegas
 
         for at_fut, at_pre in fase_atomos:
-            if at_fut:
+            if at_fut or at_pre:  # no registrar (∅, ∅)
                 candidatos[(at_fut, at_pre)] = _f(at_fut, at_pre)
 
         if not candidatos:
@@ -560,11 +577,16 @@ class QNodes(SIA):
         mejor_fut, mejor_pre = mejor_corte
 
         bloques_k2: list[tuple[frozenset, frozenset]] = []
-        if mejor_fut:
-            bloques_k2.append((mejor_fut, mejor_pre))
         comp_fut = all_fut - mejor_fut
-        if comp_fut:
-            bloques_k2.append((comp_fut, all_pre - mejor_pre))
+        comp_pre = all_pre - mejor_pre
+        # Registrar AMBOS lados del corte si son válidos (no (∅,∅)). Incluye el
+        # caso en que un lado tiene futuro ∅ pero conserva presente — p.ej. el
+        # corte aísla un mecanismo (∅,{j}): ese bloque es válido y debe figurar,
+        # de lo contrario bloques_k2 colapsa a un solo bloque (la "no-partición").
+        if mejor_fut or mejor_pre:
+            bloques_k2.append((mejor_fut, mejor_pre))
+        if comp_fut or comp_pre:
+            bloques_k2.append((comp_fut, comp_pre))
 
         pool_pendant: list[tuple[frozenset, frozenset]] = [
             (frozenset(f), frozenset(p)) for f, p in candidatos if f
@@ -585,22 +607,24 @@ class QNodes(SIA):
         Para cada bloque b y cada corte c calcula:
             inside  = (b.fut ∩ c.fut, b.pre ∩ c.pre)
             outside = (b.fut − c.fut, b.pre − c.pre)
-        Se exige que AMBOS lados conserven al menos un futuro (partición limpia
-        de los N nodos futuros); el presente puede quedar asimétrico o vacío.
+        Se exige que ningún bloque quede completamente vacío (∅, ∅); un bloque
+        puede tener futuro ∅ (si conserva presente) o presente ∅ (si conserva futuro).
         """
         mejor: list | None = None
         mejor_phi = float("inf")
 
         for pos, (eff_b, pre_b) in enumerate(bloques):
-            if len(eff_b) <= 1 and len(pre_b) == 0:
-                continue
+            if len(eff_b) + len(pre_b) <= 1:
+                continue  # bloque demasiado pequeño para dividir en dos partes válidas
             for cut_eff, cut_pre in pool:
                 in_eff = eff_b & cut_eff
                 out_eff = eff_b - cut_eff
-                if not in_eff or not out_eff:
-                    continue  # cada bloque debe conservar ≥1 futuro
-                inside = (in_eff, pre_b & cut_pre)
-                outside = (out_eff, pre_b - cut_pre)
+                in_pre = pre_b & cut_pre
+                out_pre = pre_b - cut_pre
+                if (not in_eff and not in_pre) or (not out_eff and not out_pre):
+                    continue  # algún lado sería (∅, ∅)
+                inside = (in_eff, in_pre)
+                outside = (out_eff, out_pre)
                 # Sin presente vacío: ningún lado del corte puede quedar sin mecanismo.
                 if not self._permitir_presente_vacio and (
                     not inside[1] or not outside[1]
@@ -678,15 +702,16 @@ class QNodes(SIA):
 
             # Movimientos futuros
             for i, (eff_i, pre_i) in enumerate(bloques):
-                if len(eff_i) <= 1:
-                    continue  # no vaciar el futuro de un bloque
                 for nodo in eff_i:
+                    new_eff_i = eff_i - {nodo}
+                    if not new_eff_i and not pre_i:
+                        continue  # resultaría en (∅, ∅)
                     for j in range(k):
                         if i == j:
                             continue
                         eff_j, pre_j = bloques[j]
                         cfg = list(bloques)
-                        cfg[i] = (eff_i - {nodo}, pre_i)
+                        cfg[i] = (new_eff_i, pre_i)
                         cfg[j] = (eff_j | {nodo}, pre_j)
                         phi_cand = self._emd_bloques(cfg)
                         if phi_cand < mejor_phi - 1e-10:
@@ -697,6 +722,9 @@ class QNodes(SIA):
             for i, (eff_i, pre_i) in enumerate(bloques):
                 # Sin presente vacío: no sacar el único mecanismo de un bloque.
                 if not self._permitir_presente_vacio and len(pre_i) <= 1:
+                    continue
+                # Nunca vaciar el único presente de un bloque con futuro ∅ → resultaría (∅,∅).
+                if not eff_i and len(pre_i) <= 1:
                     continue
                 for nodo in pre_i:
                     for j in range(k):
@@ -741,13 +769,17 @@ class QNodes(SIA):
 
         movimientos: list = []
         for i, (eff_i, pre_i) in enumerate(bloques):
-            if len(eff_i) > 1:
-                for nodo in sorted(eff_i):
-                    for j in range(k):
-                        if j != i:
-                            movimientos.append(("f", i, j, nodo))
+            for nodo in sorted(eff_i):
+                if not (eff_i - {nodo}) and not pre_i:
+                    continue  # resultaría en (∅, ∅)
+                for j in range(k):
+                    if j != i:
+                        movimientos.append(("f", i, j, nodo))
             # Sin presente vacío: no generar movimientos que saquen el único mecanismo.
             if not self._permitir_presente_vacio and len(pre_i) <= 1:
+                continue
+            # Nunca vaciar el único presente de un bloque con futuro ∅ → resultaría (∅,∅).
+            if not eff_i and len(pre_i) <= 1:
                 continue
             for nodo in sorted(pre_i):
                 for j in range(k):
@@ -780,8 +812,10 @@ class QNodes(SIA):
                 eff_ib, pre_ib = bl_b[i_b]
                 eff_jb, pre_jb = bl_b[j_b]
                 if tipo_b == "f":
-                    if nodo_b not in eff_ib or len(eff_ib) <= 1:
+                    if nodo_b not in eff_ib:
                         continue
+                    if not (eff_ib - {nodo_b}) and not pre_ib:
+                        continue  # resultaría en (∅, ∅)
                     bl_b[i_b] = (eff_ib - {nodo_b}, pre_ib)
                     bl_b[j_b] = (eff_jb | {nodo_b}, pre_jb)
                 else:
@@ -790,7 +824,7 @@ class QNodes(SIA):
                     bl_b[i_b] = (eff_ib, pre_ib - {nodo_b})
                     bl_b[j_b] = (eff_jb, pre_jb | {nodo_b})
 
-                if any(not eff for eff, _ in bl_b):
+                if any(not eff and not pre for eff, pre in bl_b):
                     continue
                 # Sin presente vacío: el par combinado no puede dejar bloques sin mecanismo.
                 if not self._permitir_presente_vacio and any(
@@ -817,7 +851,7 @@ class QNodes(SIA):
     ) -> "list[tuple[frozenset, frozenset]]":
         """
         Perturba una configuración de bloques alternando movimientos futuros y
-        presentes aleatorios, garantizando que ningún bloque quede sin futuro.
+        presentes aleatorios, garantizando que ningún bloque quede vacío (∅, ∅).
         """
         rng = _random_module.Random(semilla)
         result = [(frozenset(e), frozenset(p)) for e, p in bloques]
@@ -828,7 +862,10 @@ class QNodes(SIA):
         for _ in range(n_movimientos):
             tipo = rng.randint(0, 1)
             if tipo == 0:  # movimiento futuro
-                candidatos = [i for i, (e, _) in enumerate(result) if len(e) > 1]
+                candidatos = [
+                    i for i, (e, p) in enumerate(result)
+                    if len(e) >= 1 and (len(e) > 1 or len(p) > 0)
+                ]
                 if not candidatos:
                     continue
                 i = rng.choice(candidatos)
@@ -840,8 +877,14 @@ class QNodes(SIA):
                 result[j] = (eff_j | {nodo}, pre_j)
             else:  # movimiento presente (asimétrico)
                 # Sin presente vacío: solo bloques con ≥2 mecanismos pueden ceder uno.
-                minimo_pre = 0 if self._permitir_presente_vacio else 1
-                candidatos = [i for i, (_, p) in enumerate(result) if len(p) > minimo_pre]
+                # Excluir además bloques con futuro ∅ y un solo presente: quedarían (∅, ∅).
+                if self._permitir_presente_vacio:
+                    candidatos = [
+                        i for i, (e, p) in enumerate(result)
+                        if len(p) > 0 and (len(e) > 0 or len(p) > 1)
+                    ]
+                else:
+                    candidatos = [i for i, (_, p) in enumerate(result) if len(p) > 1]
                 if not candidatos:
                     continue
                 i = rng.choice(candidatos)
