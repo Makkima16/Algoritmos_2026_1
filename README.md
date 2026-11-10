@@ -10,13 +10,13 @@ Contiene dos frameworks independientes para resolver el problema de la **k-Parti
 
 1. [Conceptos de dominio](#conceptos-de-dominio)
 2. [Frameworks del proyecto](#frameworks-del-proyecto)
-   - [GeoMIP](#geomip)
+   - [KGeoMIP](#kgeomip)
    - [QNodes](#qnodes)
 3. [Comparación entre frameworks](#comparación-entre-frameworks)
 4. [Estructura de carpetas](#estructura-de-carpetas)
 5. [Requisitos previos](#requisitos-previos)
 6. [Instalación paso a paso](#instalación-paso-a-paso)
-7. [Uso — GeoMIP](#uso--geomip)
+7. [Uso — KGeoMIP](#uso--kgeomip)
 8. [Uso — QNodes](#uso--qnodes)
 9. [Dashboard (GUI)](#dashboard-gui)
 10. [Convenciones de desarrollo](#convenciones-de-desarrollo)
@@ -40,11 +40,11 @@ Contiene dos frameworks independientes para resolver el problema de la **k-Parti
 
 ## Frameworks del proyecto
 
-### GeoMIP
+### KGeoMIP
 
-**Ubicación:** `GeoMIP/`
+**Ubicación:** `KGeoMIP/`
 
-GeoMIP aborda el problema k-MIP mediante una **estrategia heurística geométrica** combinada con **paralelismo por CPU**. Su arquitectura está pensada para sistemas de tamaño medio-grande ($N \geq 15$) donde la búsqueda exhaustiva es inviable.
+KGeoMIP aborda el problema k-MIP mediante una **estrategia heurística geométrica** combinada con **paralelismo por hilos**. Su arquitectura está pensada para sistemas de tamaño medio-grande ($N \geq 15$) donde la búsqueda exhaustiva es inviable.
 
 #### Algoritmo
 
@@ -52,28 +52,29 @@ El flujo principal corre en `KGeoMIP.aplicar_estrategia()`:
 
 ```
 1. Extraer subsistema candidato y condicionar la TPM al estado inicial.
-2. Para cada k ∈ [2, K_máximo] (en paralelo, un proceso por k):
-   a. Generar candidatos iniciales:
-      · Spectral Clustering sobre matriz de afinidad geométrica (similitud coseno).
-      · Agglomerative Clustering (variantes: average, complete, single).
-      · Candidatos de aislamiento: C(N, k-1) particiones con nodos individuales.
-   b. Refinar cada candidato con búsqueda local 1-move hasta convergencia.
-3. Retornar la k-partición con menor Φ global.
+2. Si N ≤ 6: resolver por enumeración exhaustiva (_resolver_exacto_geomip).
+3. Si no:
+   a. Construir la tabla de costos (2^n_dims × N), con kernel Numba opcional.
+   b. Construir el cut pool: aislamientos simétricos, mecanismo vacío y el
+      mejor representante por nivel de Hamming.
+   c. Para cada k ∈ [2, min(5, N)] (secuencial):
+      · _greedy_k_particion  → k-1 divisiones óptimas del cut pool.
+      · _refinar_bloques_1move → best-improvement futuro + presente.
+      · _candidatos_aislamiento_bloques → siembra acotada por CAP_AISLAMIENTO_BLOQUES.
+   d. Elegir el k con menor Φ global.
 ```
 
-> **Nota:** el motor principal actual es **greedy top-down asimétrico + 1-move** (la ruta
-> spectral de arriba quedó como *fallback*). El **ILS** y el **2-move/VNS** se midieron y
-> **no mejoran Φ**, así que están en el código pero **desactivados**
-> (`N_ILS_LIGHT = 0`, `N_VNS_MAX = 0`). Detalle en
-> [`KGeoMIP/docs/decision_sin_ils.md`](KGeoMIP/docs/decision_sin_ils.md).
+> **Nota:** VNS (2-move) e ILS ligero existen en el código pero están **desactivados**
+> (`N_VNS_MAX = 0`, `N_ILS_LIGHT = 0`): se midieron y no mejoran Φ, con un coste de
+> 3–5×. Detalle en [`KGeoMIP/docs/decision_sin_ils.md`](KGeoMIP/docs/decision_sin_ils.md).
 
 #### Características principales
 
-- **EMD real con Hamming:** `emd_causal` calcula la verdadera Wasserstein-1 sobre el espacio conjunto de $2^N$ estados con distancia de Hamming como métrica base. Produce valores de Φ matemáticamente rigurosos (típicamente > 1.0).
-- **Paralelismo:** `ProcessPoolExecutor` con `cpu_count − 1` núcleos; cada proceso evalúa un valor de $k$ independiente.
+- **EMD exacta vía L1 marginal:** `evaluar_bloques` compara las marginales por nodo y suma su diferencia L1. Para distribuciones producto con métrica de Hamming, esa suma es exactamente la Wasserstein-1, con coste O(N) en vez de O(4^N).
+- **Paralelismo:** `joblib` con `prefer="threads"` (`cpu_count − 1` hilos) evalúa candidatos y vecinos; los valores de $k$ se recorren secuencialmente.
 - **LazyTPM:** Para $N \geq 18$, la TPM no se carga completa en RAM. Un generador lee por *chunks* y calcula las marginales incrementalmente, permitiendo sistemas de hasta $N = 25+$.
-- **Modo bloque CSV:** Carga lotes de pruebas, ordena por complejidad creciente, calienta caché antes de la primera prueba y exporta resultados a `.xlsx` con formato profesional.
-- **Mecanismo vacío (∅):** Soporte explícito para partes con mecanismo vacío mediante un centinela `-1`, produciendo distribuciones uniformes sin penalización artificial.
+- **Modo bloque CSV:** Carga lotes de pruebas, ordena por complejidad creciente, calienta el motor antes de la primera prueba y exporta resultados a `.xlsx`.
+- **Mecanismo vacío (∅):** Soporte explícito para partes con mecanismo vacío mediante un centinela `-1`.
 
 #### Arquitectura OOP
 
@@ -91,9 +92,9 @@ El flujo principal corre en `KGeoMIP.aplicar_estrategia()`:
 
 ### QNodes
 
-**Ubicación:** `QNodes/`
+**Ubicación:** `KQNodes/`
 
-QNodes aborda el problema k-MIP mediante **agrupamiento aglomerativo greedy** (bottom-up) con **memoización de distribuciones** y búsqueda libre sobre todos los valores posibles de $k$, sin necesidad de especificar $k$ de antemano.
+QNodes aborda el problema k-MIP mediante **cortes asimétricos** (futuro y presente se particionan de forma independiente), **Queyranne** para la bipartición exacta $k=2$, **greedy top-down**, refinamiento local e **ILS**, con búsqueda libre sobre todos los valores de $k$ si el usuario no fija uno.
 
 #### Algoritmo
 
@@ -101,63 +102,52 @@ El flujo principal corre en `QNodes.aplicar_estrategia()`:
 
 ```
 1. Preparar subsistema: condicionar la TPM, seleccionar alcance y mecanismo.
-2. _aglomerar() — O(N³):
-   · Inicializar N singletons (un grupo por nodo).
-   · Pre-poblar caché de distribuciones y costos.
-   · Repetir N-2 veces:
-       N ≤ 12 → evaluar EMD Hamming de la partición completa para cada par.
-       N > 12 → evaluar Δ = costo(Gᵢ∪Gⱼ) − costo(Gᵢ) − costo(Gⱼ)  (L1 aditivo).
-       Fusionar el par con menor incremento de Φ.
-       Registrar historial[k] = (phi, grupos) para cada nivel k.
-   · Retornar historial completo {k: (phi, grupos)} para k ∈ [2, N].
-3. Para k especificado:
-   · Refinar historial[k] con 1-move hasta convergencia.
-   · Evaluar C(N, k-1) candidatos de aislamiento [solo N ≤ 12].
-4. Para k libre (k=None):
-   · N ≤ 12: refinar + evaluar candidatos de aislamiento para CADA nivel k.
-     Seleccionar el k ∈ [3, N] con menor Φ global entre todos los niveles.
-   · N > 12: seleccionar el k ≥ 3 con menor Φ del historial greedy + refinar una vez.
-5. Retornar la partición óptima con su Φ y k.
+2. Si N ≤ 6: _resolver_exacto() por enumeración de k-particiones asimétricas.
+3. Si no, _resolver_heuristico():
+   a. _queyranne() sobre 2N átomos asimétricos (o N simétricos si no se permite ∅):
+      obtiene la bipartición k=2 globalmente óptima y un pool de cortes colgantes.
+   b. Combinar ese pool con _construir_pool_cortes() (aislamientos + mecanismo ∅).
+   c. k fijo: _greedy_bloques() + _refinar_bloques() + _refinar_con_ils().
+   d. k libre: _greedy_descenso() registra cada nivel k, se refina por nivel y se
+      elige el k ≥ 3 con menor Φ; después se aplica ILS al ganador.
+4. Reconstruir la distribución marginal de la partición y devolver Solution.
 ```
 
 #### Características principales
 
-- **Estrategia uniforme para todo N:** Las tres fases (agrupamiento greedy, refinamiento 1-move, candidatos de aislamiento) se aplican para cualquier tamaño de sistema, sin excepciones por N.
-- **Búsqueda libre sobre k:** A diferencia de GeoMIP, QNodes puede encontrar la k óptima global sin que el usuario la especifique. En modo k libre, las tres fases se ejecutan sobre cada nivel k del historial y se elige el k con menor Φ global.
-- **Memoización de distribuciones:** `_cache_dist` almacena la distribución marginal de cada subconjunto (representado como máscara entera). `_emd_particion` obtiene distribuciones en O(1) para máscaras ya vistas, amortizando el costo de las tres fases.
-- **Representación por máscaras enteras:** Cada subconjunto de nodos es un entero de $N$ bits. Las operaciones de unión (`|`), diferencia (`^`) y extracción de bits (`& -m`) son operaciones nativas de hardware.
-- **Métrica adaptada en `_emd_particion`:** Para $N \leq 12$ usa Wasserstein-1 con distancia de Hamming (métrica exacta de IIT, misma que GeoMIP). Para $N > 12$ usa la suma L1 marginal (aproximación rápida, necesaria porque la distribución conjunta $2^N$ y la matriz Hamming $4^N$ serían inmanejables en memoria). Esta decisión es interna y transparente para la estrategia.
-- **Independencia de GeoMIP:** Para k libre, QNodes realiza su propia búsqueda exhaustiva sobre todos los niveles $k$ para todo N y puede retornar una partición distinta a la de GeoMIP si existe un $k$ diferente con menor $\Phi$ global — ambos resultados son matemáticamente válidos.
+- **Métrica exacta en O(N):** `_emd_bloques` reconstruye las marginales y suma su diferencia L1. Para distribuciones producto con métrica de Hamming, esa L1 es exactamente la Wasserstein-1, sin el coste O(4^N) de `pyemd`.
+- **k=2 exacto vía Queyranne:** con átomos asimétricos, el algoritmo de Queyranne garantiza la bipartición óptima global en O(N²) evaluaciones.
+- **Búsqueda libre sobre k:** si no se especifica $k$, se evalúan todos los niveles del descenso greedy y se elige el de menor Φ (prefiriendo $k \geq 3$).
+- **Memoización de bloques:** `_cache_bloque[(futuros, presentes)]` guarda la distribución marginal de cada bloque; `NCube.marginal_valor` reduce cada evaluación a O(2^(N−|pre|)).
+- **Representación asimétrica:** cada bloque es `(frozenset futuros, frozenset presentes)`, lo que permite movimientos de presente sin mover el futuro correspondiente.
 
 #### Complejidad
 
 | Fase | Complejidad | Condición |
 |------|-------------|-----------|
-| Agrupamiento greedy | O(N³) llamadas a `_emd_particion` | Siempre |
-| Refinamiento 1-move | O(N × k × iteraciones) llamadas | Siempre |
-| Candidatos de aislamiento (k fijo) | C(N, k−1) evaluaciones | Siempre |
-| Candidatos de aislamiento (k libre) | $2^N − 2$ evaluaciones en total | k=None |
-| Una llamada `_emd_particion` (N ≤ 12) | O($2^N$) — distribución conjunta Hamming | N ≤ 12 |
-| Una llamada `_emd_particion` (N > 12) | O(N) — suma L1 marginal | N > 12 |
+| Queyranne (k=2 exacto) | O((2N)²) evaluaciones | Siempre |
+| Greedy top-down | O(N) divisiones sobre el pool | Siempre |
+| Refinamiento 1-move | O(N × k × iteraciones) | Siempre |
+| ILS | O(N_ILS × N) evaluaciones | Siempre |
+| Enumeración exacta | Stirling2(N,k) × k^n_dims | N ≤ 6 |
+| Una evaluación `_emd_bloques` | O(N) — suma L1 marginal | Siempre |
 
-Para $N = 10$ con $k$ libre: ~1 022 evaluaciones adicionales → **< 1 segundo**.  
-Para $N = 20$ con $k$ libre: ~1 M evaluaciones × O(20) cada una → **pocos segundos**.  
-Para $N = 25$ con $k$ libre: ~33 M evaluaciones × O(25) cada una → **decenas de segundos**.
+Para $N = 10$ la ruta exacta cubre todo el espacio tratable; para $N = 20$–$25$ se usa la heurística (Queyranne + greedy + ILS) en segundos o decenas de segundos según $k$.
 
 ---
 
 ## Comparación entre frameworks
 
-| Criterio | GeoMIP | QNodes |
-|----------|--------|--------|
-| **Estrategia principal** | Greedy top-down asimétrico + 1-move (geométrico como fallback) | Agrupamiento aglomerativo greedy |
+| Criterio | KGeoMIP | QNodes |
+|----------|---------|--------|
+| **Estrategia principal** | Greedy top-down + cut pool geométrico + 1-move | Queyranne k=2 + greedy top-down + 1-move + ILS |
 | **k de entrada** | Requerido (o rango completo en bloque) | Opcional — búsqueda libre sobre todos los k |
-| **Métrica EMD** | Hamming real siempre | Hamming (N ≤ 12) / L1 (N > 12) en `_emd_particion` |
-| **Paralelismo** | ProcessPoolExecutor (un proceso por k) | Single-thread; eficiencia por memoización |
-| **Escalabilidad** | N ≤ 25 con LazyTPM | N ≤ 25 (L1 para N > 12) |
-| **Garantía de optimalidad** | Óptimo local (greedy + 1-move; exacto N ≤ 6) | Óptimo local greedy + 1-move (exacto k=2 vía Queyranne) |
+| **Métrica EMD** | L1 marginal exacta (Wasserstein-1 con Hamming) | L1 marginal exacta (Wasserstein-1 con Hamming) |
+| **Paralelismo** | joblib threads (candidatos y vecinos) | Single-thread; eficiencia por memoización |
+| **Escalabilidad** | N ≤ 25 con LazyTPM | N ≤ 25 con `NCube.marginal_valor` |
+| **Garantía de optimalidad** | Exacto N ≤ 6; óptimo local (greedy + 1-move) | Exacto N ≤ 6 y k=2 exacto vía Queyranne; óptimo local para k≥3 |
 | **Modo de entrada** | Manual / bloque CSV | Manual / bloque CSV |
-| **Salida** | JSON (manual) / Excel (bloque) | Excel (bloque) |
+| **Salida** | JSON (manual) / Excel (bloque) | JSON (manual) / Excel (bloque) |
 | **Mecanismo vacío (∅)** | Soportado | Soportado (`permitir_presente_vacio`) |
 
 ---
@@ -166,56 +156,64 @@ Para $N = 25$ con $k$ libre: ~33 M evaluaciones × O(25) cada una → **decenas 
 
 ```
 AYDA_2026_1/
-├── CLAUDE.md                          ← instrucciones del proyecto para el asistente
-├── .venv/                             ← entorno virtual Python (compartido, no se sube al repo)
+├── README.md, CLAUDE.md               ← documentación e instrucciones del proyecto
+├── requirements.txt                   ← dependencias Python (todas las carpetas)
+├── setup.sh / setup.ps1               ← creación del .venv e instalación
+├── .venv/                             ← entorno virtual Python (no se sube al repo)
 │
-├── GeoMIP/
-│   ├── pyproject.toml                 ← dependencias de GeoMIP
+├── data/                              ← datos y scripts COMPARTIDOS
+│   ├── creation.py                    ← generación de TPMs
+│   ├── run_suite_2026.py              ← suite comparativa KGeoMIP vs KQNodes
+│   ├── _worker_motor.py               ← worker aislado por motor (para la suite)
+│   ├── compare_pruebas.py             ← benchmark y gráficas (matplotlib)
+│   ├── graficos_suite.py              ← gráficas nativas de Excel
+│   ├── generar_graficos_cli.py        ← CLI de gráficas
+│   ├── samples_binary/                ← TPMs binarias (N=3..25; no versionadas)
+│   ├── samples_no_binary/             ← TPMs no binarias (no versionadas)
+│   └── Pruebas/                       ← CSVs de lotes de prueba
+│
+├── KGeoMIP/
+│   ├── pyproject.toml                 ← dependencias de KGeoMIP
 │   ├── exec_kgeomip.py                ← entrypoint interactivo principal
-│   ├── data/
-│   │   ├── samples_binary/            ← TPMs binarias de prueba (N=3..25)
-│   │   ├── samples_no_binary/         ← TPMs no binarias
-│   │   └── Pruebas/                   ← CSVs de lotes de prueba
-│   ├── results/                       ← JSONs y Excel con resultados
-│   ├── viewer/                        ← frontend de visualización de resultados
-│   ├── view_result.py                 ← visualizador de JSON en terminal
+│   ├── docs/                          ← documentación técnica
+│   ├── tests/                         ← pytest sobre la tabla de costos
+│   ├── results/                       ← JSONs y Excel con resultados (no versionados)
 │   └── src/
 │       ├── controllers/
 │       │   ├── manager.py             ← carga TPM, enruta estrategias
-│       │   └── strategies/
-│       │       └── kgeomip.py         ← algoritmo KGeoMIP completo
+│       │   └── strategies/kgeomip.py  ← algoritmo KGeoMIP completo
 │       ├── models/
-│       │   ├── base/
-│       │   │   ├── application.py     ← configuración global
-│       │   │   └── sia.py             ← caché del candidato condicionado
-│       │   └── core/
-│       │       ├── system.py          ← condicionamiento, particionamiento
-│       │       ├── ncube.py           ← hipercubo por nodo, marginalización cacheada
-│       │       └── solution.py        ← representación del resultado
-│       ├── funcs/
-│       │   ├── base.py                ← utilidades generales (ABECEDARY, etc.)
-│       │   ├── emd_optimized.py       ← emd_causal con matriz Hamming
-│       │   └── format.py              ← formateo de particiones
-│       └── lazy_tpm.py                ← lectura lazy por chunks para N ≥ 18
+│       │   ├── base/                  ← application.py, sia.py (caché del candidato)
+│       │   ├── core/                  ← system.py, ncube.py, solution.py, lazy_tpm.py
+│       │   └── enums/                 ← distance.py, notation.py
+│       ├── funcs/base.py              ← ABECEDARY, emd_causal, reindexado
+│       ├── constants/                 ← base.py, error.py, models.py
+│       └── middlewares/               ← slogger.py, profile.py
 │
-└── QNodes/
-    ├── pyproject.toml                 ← dependencias de QNodes
-    ├── exec.py                        ← entrypoint interactivo principal
-    ├── review/                        ← scripts de testing y profiling
-    └── src/
-        ├── main.py                    ← lógica del lanzador CLI
-        ├── strategies/
-        │   ├── q_nodes.py             ← algoritmo QNodes (aglomerativo + 1-move)
-        │   ├── force.py               ← búsqueda exhaustiva (referencia)
-        │   └── phi.py                 ← cálculo de Phi unitario
-        ├── funcs/
-        │   ├── iit.py                 ← emd_causal, Hamming matrix, distribución conjunta
-        │   └── format.py              ← formateo de particiones
-        └── models/
-            ├── base/sia.py            ← caché del candidato condicionado
-            └── core/
-                ├── system.py          ← condicionamiento, marginales
-                └── ncube.py           ← hipercubo por nodo
+├── KQNodes/
+│   ├── pyproject.toml                 ← dependencias de KQNodes
+│   ├── exec.py                        ← entrypoint interactivo principal
+│   ├── docs/                          ← documentación técnica
+│   └── src/
+│       ├── strategies/q_nodes.py      ← algoritmo QNodes (Queyranne + greedy + ILS)
+│       ├── strategies/force.py        ← BruteForceKMIP (ground truth)
+│       ├── funcs/
+│       │   ├── iit.py                 ← reindexado, Hamming y utilidades
+│       │   ├── force.py               ← generación de k-particiones (Stirling)
+│       │   └── format.py              ← formateo de particiones
+│       ├── models/                    ← System, NCube, Solution, SIA
+│       ├── constants/                 ← base.py, error.py, models.py
+│       └── middlewares/               ← slogger.py, profile.py
+│
+├── Brute_Force/
+│   ├── comparar_fuerza_bruta.py       ← BF vs KQNodes vs KGeoMIP (N ≤ 6)
+│   └── samples_force/                 ← TPMs pequeñas para la comparación
+│
+├── dashboard/                         ← GUI React + FastAPI
+│   ├── server/                        ← backend (main.py, workers.py, metrics.py…)
+│   └── src/                           ← frontend (App.jsx, views/, components/)
+│
+└── docs/                              ← PDFs, manuales y material de la asignatura
 ```
 
 ---
@@ -272,28 +270,30 @@ source .venv/bin/activate
 
 El prompt de la terminal mostrará `(.venv)` al estar activo.
 
-### 4. Instalar las dependencias de ambos frameworks
+### 4. Instalar las dependencias
 
 ```bash
-pip install -e GeoMIP/
-pip install -e QNodes/
+pip install -r requirements.txt
 ```
 
-El flag `-e` instala en modo *editable*: los cambios en el código fuente se reflejan sin reinstalar. Pip resolverá automáticamente todas las dependencias transitivas (numpy, scipy, pyphi, pyemd, POT, joblib, pandas, openpyxl, etc.).
+También puedes instalar cada framework en modo *editable* si vas a modificar su
+código (`pip install -e KGeoMIP/` y `pip install -e KQNodes/`). Las dependencias
+principales son numpy, pandas, pyemd, joblib, numba, openpyxl, matplotlib,
+colorama, pyttsx3, pyinstrument y, para el dashboard, fastapi/uvicorn/pydantic.
 
 ### 5. Verificar la instalación
 
 ```bash
-python -c "import pyphi, numpy, scipy, pyemd; print('Todo OK')"
+python -c "import numpy, pandas, pyemd, openpyxl; print('Todo OK')"
 ```
 
 ---
 
-## Uso — GeoMIP
+## Uso — KGeoMIP
 
 ```bash
 # Con el .venv activo:
-python GeoMIP/exec_kgeomip.py
+python KGeoMIP/exec_kgeomip.py
 ```
 
 Al ejecutar, el programa ofrece dos modos:
@@ -306,7 +306,7 @@ Ingreso interactivo de una prueba individual:
 2. Ingresar sistema candidato en binario (`1111111111` = sistema completo).
 3. Ingresar estado inicial en binario (o `ENTER` para uno aleatorio).
 4. Ingresar alcance (t+1) y mecanismo (t) como etiquetas de nodos (`ABCDE`, `ABC`, etc.).
-5. Ingresar $K$ (o `ENTER` para evaluar todas las k posibles).
+5. Ingresar $K$ (o `ENTER` para evaluar $k = 2, \ldots, \min(5, N)$).
 6. Elegir si se permite mecanismo vacío (∅).
 
 ### Modo 2 — Por bloque (CSV)
@@ -322,9 +322,9 @@ Procesa un lote de pruebas desde un archivo CSV:
 
 - El candidato y el estado inicial se ingresan una sola vez para todo el lote.
 - Las pruebas se reordenan automáticamente de menor a mayor complejidad.
-- Los resultados se exportan a un archivo `.xlsx` en `GeoMIP/results/block/`.
+- Los resultados se exportan a un archivo `.xlsx` en `KGeoMIP/results/block/`.
 
-Los CSVs de prueba se encuentran en `GeoMIP/data/Pruebas/`.
+Los CSVs de prueba se encuentran en `data/Pruebas/`.
 
 ---
 
@@ -332,10 +332,10 @@ Los CSVs de prueba se encuentran en `GeoMIP/data/Pruebas/`.
 
 ```bash
 # Con el .venv activo:
-python QNodes/exec.py
+python KQNodes/exec.py
 ```
 
-El flujo es análogo al de GeoMIP:
+El flujo es análogo al de KGeoMIP:
 
 1. Seleccionar tipo de TPM y archivo.
 2. Ingresar sistema candidato, estado inicial, alcance y mecanismo.
@@ -345,7 +345,7 @@ El flujo es análogo al de GeoMIP:
 **Activar profiling** (genera reporte HTML con pyinstrument):
 
 ```python
-# En QNodes/exec.py, antes de ejecutar:
+# En KQNodes/exec.py, antes de ejecutar:
 aplicacion.activar_profiling()
 ```
 
@@ -356,7 +356,7 @@ aplicacion.activar_profiling()
 Interfaz gráfica (React + Vite + FastAPI) en `dashboard/` para operar y analizar ambos
 frameworks desde el navegador. Mantiene un worker persistente por motor (aislamiento del
 paquete `src`) y permite ejecutar por bloque (streaming SSE), explorar resultados guardados
-y comparar QNodes vs GeoMIP con métricas. Detalles y endpoints en
+y comparar QNodes vs KGeoMIP con métricas. Detalles y endpoints en
 [`dashboard/README.md`](dashboard/README.md).
 
 ```bash
@@ -384,6 +384,6 @@ Dos detalles del **modo análisis** que conviene conocer:
 | **Idioma** | Código, comentarios y nombres de variable en **español** |
 | **Nodos futuros/presentes** | Variables de t+1 (efecto/alcance) en MAYÚSCULAS; variables de t (causa/mecanismo) en minúsculas |
 | **Indexación** | *Little-Endian* — el bit menos significativo corresponde al primer nodo (nodo A = bit 0) |
-| **Representación de subconjuntos** | Máscaras enteras de N bits: `{A, C} = 0b0101 = 5` |
-| **Entorno virtual** | `.venv/` en la raíz del repo, compartido por GeoMIP y QNodes, nunca comiteado |
+| **Representación de particiones** | Bloques asimétricos `(frozenset futuros, frozenset presentes)` de índices globales |
+| **Entorno virtual** | `.venv/` en la raíz del repo, compartido por KGeoMIP y KQNodes, nunca comiteado |
 | **Logs** | Archivos `.log` en `.logs/`, ignorados por git |

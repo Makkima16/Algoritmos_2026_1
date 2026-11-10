@@ -30,7 +30,7 @@ Los tiempos en el libro están como texto formateado ("0.0865 s", "1 min 48.70 s
 import re
 from typing import Optional
 
-from openpyxl.chart import ScatterChart, BarChart, LineChart, Reference, Series
+from openpyxl.chart import ScatterChart, BarChart, Reference, Series
 from openpyxl.chart.marker import Marker
 from openpyxl.chart.trendline import Trendline
 from openpyxl.styles import Font, PatternFill, Alignment

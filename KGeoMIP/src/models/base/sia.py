@@ -10,7 +10,6 @@ from src.controllers.manager import Manager
 from src.models.core.system import System
 
 from src.constants.base import (
-    COLON_DELIM,
     FLOAT_ZERO,
     STR_ZERO,
 )

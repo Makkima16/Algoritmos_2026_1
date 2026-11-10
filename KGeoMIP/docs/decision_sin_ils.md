@@ -100,9 +100,8 @@ constante de bucle = 0**, no eliminadas:
 > Reactivar cualquiera es subir su constante (`N_VNS_MAX` / `N_ILS_LIGHT`) a > 0; el ILS
 > ligero ya usa semilla fija, así que conserva el determinismo si se reactiva.
 
-> Nota: la función `_evaluar_k_completo` (ruta simétrica alternativa, **no invocada**
-> por el flujo principal) conserva su propia lógica de ILS (`N_ILS = 4`), irrelevante en
-> runtime por ser código inactivo.
+> Nota: `_evaluar_k_completo` (ruta simétrica alternativa, nunca invocada por el flujo
+> principal) se eliminó en 2026-11 junto con el resto del pipeline espectral.
 
 ---
 

@@ -17,11 +17,11 @@ para distribuciones producto, que es el caso de cualquier k-partición de un sis
 
 ## Por qué GeoMIP encuentra mejor Φ que QNodes para k ≥ 3 en N grande
 
-GeoMIP y QNodes comparten el mismo motor base (greedy top-down asimétrico + 1-move
+KGeoMIP y QNodes comparten el mismo motor base (greedy top-down asimétrico + 1-move
 futuro/presente + métrica L1 exacta). La diferencia está en la **diversidad del pool de
-cortes**: GeoMIP añade una tercera familia de candidatos derivada de la matriz de
-afinidad geométrica de las columnas de la TPM (similitud espectral entre nodos), lo que
-expone particiones que el greedy puro no genera.
+cortes**: KGeoMIP añade una tercera familia de candidatos con el mejor representante de
+cada nivel de Hamming de la tabla de costos, lo que expone particiones que el greedy puro
+no genera.
 
 A N pequeño (≤ 20) ambos frameworks coinciden exactamente en Φ para todos los k.
 A N ≥ 22, la exploración geométrica empieza a dominar:
@@ -37,10 +37,9 @@ Para k=2, QNodes (algoritmo de Queyranne) tiene **garantía de óptimo global ex
 GeoMIP k=2 es heurístico y puede perder el óptimo. Para k≥3, ninguno garantiza el
 óptimo (NP-hard), pero GeoMIP explora un vecindario más rico geométricamente.
 
-**Lo que GeoMIP sacrifica:** tiempo. QNodes es 2×–5× más rápido en N=22 para todos
-los k. La diferencia crece con N porque la construcción de la tabla de costos y la
-matriz de afinidad de GeoMIP son O(N × 2^N), mientras que QNodes con `marginal_valor`
-es O(N² × 2^(N/2)).
+**Lo que KGeoMIP sacrifica:** tiempo. QNodes es 2×–5× más rápido en N=22 para todos
+los k. La diferencia crece con N porque la construcción de la tabla de costos de
+KGeoMIP es O(N × 2^N), mientras que QNodes con `marginal_valor` es O(N² × 2^(N/2)).
 
 ---
 

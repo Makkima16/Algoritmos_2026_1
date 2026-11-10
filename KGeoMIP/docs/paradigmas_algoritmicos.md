@@ -1,5 +1,11 @@
 # Paradigmas Algorítmicos en GeoMIP — Qué se Usa, Qué No y Por Qué
 
+> **Nota (2026-11):** la ruta espectral (`_particion_grafo_hipercubo`,
+> `_evaluar_k_completo`, `_agrupamiento_jerarquico`) y la dependencia de scikit-learn
+> se eliminaron del código por ser código muerto. Las secciones que las describen se
+> conservan como registro histórico del diseño; el motor vigente es únicamente
+> greedy top-down + cut pool + refinamiento 1-move.
+
 ## El Problema en Cuestión
 
 Antes de analizar los algoritmos, es crucial entender la estructura del problema.
@@ -354,9 +360,9 @@ computa ~50 marginalizaciones; Bottom-Up habría precomputado 32.768 × 15 = ~50
 
 ### Bottom-Up — Dónde y Por Qué
 
-**Componentes:**
-1. **Agglomerative Clustering** (`AgglomerativeClustering`)
-2. **Fallback jerárquico** en `_evaluar_k_completo()` cuando sklearn no está disponible
+**Componentes (eliminados en 2026-11):**
+1. ~~**Agglomerative Clustering** (`AgglomerativeClustering`)~~
+2. ~~**Fallback jerárquico** en `_evaluar_k_completo()` cuando sklearn no está disponible~~
 
 **Estrategia:** Empezar con N singletons (cada nodo es su propio grupo) y fusionar iterativamente
 el par cuya unión produce el menor Φ, hasta llegar a k grupos.
@@ -397,9 +403,9 @@ el dendrograma a distintas alturas. Esto amortiza el costo del clustering entre 
 |-----------------------------------|----------------|----------------------------------------------------------------|
 | **`_greedy_k_particion` (motor principal)** | **Top-Down + Greedy** | Divide el sistema en k-1 splits; pool de O(N) cortes lo hace tratable (no O(2^N)) |
 | `NCube.marginalizar()` (caché)    | Top-Down (DP)  | Se piden sólo algunas marginalizaciones; precomputar todo sería 2^N entradas por NCube |
-| `AgglomerativeClustering` (fallback) | Bottom-Up   | Estructura local entre pares → construir hacia arriba es natural y eficiente |
-| Fallback jerárquico (`_evaluar_k_completo`) | Bottom-Up + Greedy | Fusionar el par de menor pérdida cuando no hay sklearn |
-| Spectral Clustering (fallback)    | Global (ni B-U ni T-D) | Opera sobre el espectro de la matriz de afinidad completa; no es recursivo |
+| ~~`AgglomerativeClustering` (fallback)~~ | ~~Bottom-Up~~ | **Eliminado (2026-11)** |
+| ~~Fallback jerárquico (`_evaluar_k_completo`)~~ | ~~Bottom-Up + Greedy~~ | **Eliminado (2026-11)** |
+| ~~Spectral Clustering (fallback)~~ | ~~Global~~ | **Eliminado (2026-11)** |
 | Refinamiento 1-move (futuro+presente) | Greedy local | Explorar vecinos del punto actual; no requiere recorrido del árbol; **fase final** del motor |
 | ~~ILS (Iterated Local Search)~~   | ~~Metaheurística~~ | **Retirada (2026-06-12)** — ganancia marginal y costo alto; ver `decision_sin_ils.md` |
 

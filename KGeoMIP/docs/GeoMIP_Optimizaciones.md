@@ -95,8 +95,8 @@ con el **presente vacío** (el flag se respeta en split y refinamiento).
 ### Impacto
 
 Φ resulta coherente y mínimo real; el pipeline antiguo basado en SpectralClustering
-queda como **fallback** (`_evaluar_k_completo`, `_agrupamiento_jerarquico`) y ya no
-es la ruta principal.
+(`_evaluar_k_completo`, `_agrupamiento_jerarquico`) se eliminó en 2026-11 por ser código
+muerto y ya no forma parte del repositorio.
 
 ---
 
@@ -130,13 +130,9 @@ La tabla alimenta el pool de cortes geométricos (`_construir_cut_pool`, el mejo
 representante por cáscara de Hamming). Su costo se amortiza entre todos los k del lote,
 que reutilizan la misma tabla.
 
-> **Cambio (2026-06-14):** la tabla **ya NO** se usa para construir una matriz de
-> afinidad geométrica. Antes, `_construir_tabla_costos` terminaba llamando a
-> `_construir_matriz_afinidad`, que recorría las `2^n_dims × n` celdas **dos veces en
-> float64** (`astype(float64)` + división por normas) para producir una matriz N×N que
-> **ningún camino de producción consumía** (solo la usaba `_evaluar_k_completo`, el
-> camino espectral antiguo sin uso). Era CPU desperdiciado en **cada** corrida y para
-> **todo N**, y el pico de RAM dominante en N grande (ver §11). Se eliminó la llamada.
+> **Cambio (2026-11):** la tabla no se usa para construir una matriz de afinidad. La
+> construcción y el camino espectral (`_construir_matriz_afinidad`, `_evaluar_k_completo`,
+> `_particion_grafo_hipercubo`) se eliminaron del código por ser código muerto.
 
 ---
 
@@ -385,14 +381,15 @@ Dos cambios que **bajan el pico de RAM** sin tocar Φ, habilitando N grande (N25
 en máquinas modestas. Para N=25 completo, `2^25 ≈ 33.5 M` filas × 25 cols × 4 B (float32) =
 **~3.35 GB por cada arreglo `(2^n_dims, n)`**; el problema era cuántos coexistían.
 
-### 11.1 Eliminar la matriz de afinidad (gana ~13 GB y CPU en TODO N)
+### 11.1 Eliminar la matriz de afinidad y el camino espectral (gana ~13 GB y CPU en TODO N)
 
 `_construir_tabla_costos` llamaba `_construir_matriz_afinidad()` al final, que hacía
 `C = tabla_T.astype(np.float64)` (+6.7 GB) y `C_norm = C / norms` (+6.7 GB) para producir
-una matriz N×N que **nadie lee**: `_evaluar_k_completo` / `_particion_grafo_hipercubo`
-(camino espectral) no se invocan desde `aplicar_estrategia`. Era doble pasada en float64 en
-**cada** corrida (CPU desperdiciado para todo N) y el pico de RAM dominante en N grande.
-Se eliminó la llamada. No cambia Φ (verificado: rutas Numba y numpy dan el mismo Φ).
+una matriz N×N que **nadie leía**: `_evaluar_k_completo` / `_particion_grafo_hipercubo`
+(camino espectral) nunca se invocaban desde `aplicar_estrategia`. Era doble pasada en float64
+en **cada** corrida (CPU desperdiciado para todo N) y el pico de RAM dominante en N grande.
+En 2026-11 se eliminaron tanto la llamada como todo ese camino espectral. No cambia Φ
+(verificado: rutas Numba y numpy dan el mismo Φ).
 
 ### 11.2 Construir `prob_T` directo, sin duplicar (gana ~3.35 GB)
 

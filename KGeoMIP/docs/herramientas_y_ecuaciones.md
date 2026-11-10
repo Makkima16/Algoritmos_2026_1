@@ -33,23 +33,14 @@ principal (`evaluar_bloques`) usa la fórmula marginal directa.
 
 ---
 
-### scikit-learn
-**¿Para qué?** Generación de candidatos de partición mediante clustering.
+### scikit-learn — ELIMINADO
+**¿Para qué era?** Generación de candidatos de partición mediante SpectralClustering y
+AgglomerativeClustering sobre una matriz de afinidad.
 
-```python
-from sklearn.cluster import SpectralClustering, AgglomerativeClustering
-```
-
-- `SpectralClustering(affinity="precomputed", n_clusters=k)`: toma la matriz de afinidad
-  geométrica precalculada y agrupa los nodos
-- `AgglomerativeClustering(n_clusters=k, linkage="average"|"complete"|"single")`: clustering
-  jerárquico bottom-up con distintos criterios de enlace
-
-**¿Por qué scikit-learn?** Es la librería de ML más completa de Python para clustering. Ofrece
-los algoritmos que necesitamos con parámetros de afinidad personalizada y es una dependencia
-opcional (si no está instalada, GeoMIP hace fallback a heurísticas de varianza). No se necesita
-ningún otro framework de ML porque no se entrena ningún modelo: el clustering es puramente
-heurístico para generar candidatos.
+**Estado actual:** esa ruta era código muerto (no la invocaba `aplicar_estrategia`) y se
+eliminó en 2026-11, junto con la dependencia de scikit-learn. El motor vigente genera
+candidatos con `_construir_cut_pool` (aislamientos + mejor representante por nivel de
+Hamming) y los refina con 1-move.
 
 ---
 

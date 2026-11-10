@@ -2,7 +2,6 @@ import numpy as np
 import time
 import os
 import sys
-import multiprocessing
 
 
 class SystemCreator:

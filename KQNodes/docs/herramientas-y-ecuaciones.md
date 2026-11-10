@@ -20,15 +20,6 @@ Usada en prácticamente todo el código numérico.
 
 ---
 
-### PyPhi (`pyphi 1.2.0`)
-
-- **Propósito:** ground truth teórico de IIT. La estrategia `Phi` delega en PyPhi.
-- **Uso:** validación de `QNodes` y `BruteForce`; no se usa en la búsqueda principal.
-
-**Archivo:** `src/strategies/phi.py`
-
----
-
 ### pyinstrument (`5.1.2`)
 
 - **Propósito:** profiling estadístico con reportes HTML.
@@ -48,10 +39,9 @@ Usada en prácticamente todo el código numérico.
 
 ---
 
-### colorama + pyttsx3 + tkinter
+### colorama + pyttsx3
 
 - **colorama:** color en terminal. **pyttsx3:** síntesis de voz del resultado.
-  **tkinter:** diálogos de selección de archivo.
 
 **Archivos:** `src/middlewares/slogger.py`, `src/models/core/solution.py`, `exec.py`
 

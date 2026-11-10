@@ -175,7 +175,7 @@ Estrictamente dominado por B&B, que ya es intratable para N ≥ 15.
 
 ### Búsqueda exhaustiva (fuerza bruta)
 
-**¿Se utiliza?** No en QNodes, pero existe como estrategia separada (`BruteForce`) como
+**¿Se utiliza?** No en QNodes, pero existe como estrategia separada (`BruteForceKMIP`) como
 ground truth para N ≤ 10, para validar la calidad del greedy.
 
 ---
@@ -227,7 +227,7 @@ espectral quedó como fallback.)
 | Programación Dinámica (memoización) | **Utilizado — soporte** | `_cache_bloque` + `valor_memo` evitan recalcular distribuciones y valores |
 | Branch & Bound | **No** | Intratable para N ≥ 15 aun con poda |
 | Backtracking puro | **No** | Dominado por B&B |
-| Búsqueda exhaustiva | **Solo en BruteForce** | Ground truth para N ≤ 10 |
+| Búsqueda exhaustiva | **Solo en BruteForceKMIP** | Ground truth para N ≤ 10 |
 | Genéticos / SA | **No** | Sin ventaja sobre ILS; menos pedagógico |
 | ILP | **No** | Objetivo no linealizable |
 | Divide y vencerás | **No** | Subproblemas no independientes |

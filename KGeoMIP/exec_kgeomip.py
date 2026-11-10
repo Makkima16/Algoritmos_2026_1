@@ -37,7 +37,7 @@ from openpyxl.utils import get_column_letter
 from src.models.base.application import aplicacion
 from src.controllers.manager import Manager
 from src.controllers.strategies.kgeomip import KGeoMIP
-from src.controllers.strategies.kgeomip import _serializar_particion, warmup_motor
+from src.controllers.strategies.kgeomip import warmup_motor
 from src.funcs.base import ABECEDARY
 from src.models.core.lazy_tpm import cargar_tpm
 
@@ -75,12 +75,6 @@ def formatear_tiempo(segundos: float) -> str:
 
 
 # ── Helpers de selección de archivos ──────────────────────────────────────
-
-def _archivos_tpm_para_n(n: int) -> list:
-    """Archivos en samples_binary cuyo nombre empieza por N{n} seguido de un carácter no numérico."""
-    patron = re.compile(rf'^N{n}\D', re.IGNORECASE)
-    return sorted(f for f in SAMPLES_DIR.glob("*.csv") if patron.match(f.name))
-
 
 def _archivos_pruebas_para_n(n: int) -> list:
     """Archivos en Pruebas cuyo nombre contiene _N{n} seguido de separador o extensión."""
@@ -345,71 +339,6 @@ def _letras_a_binario(etiquetas: str, n_nodos: int) -> str:
         if not matched:
             idx += 1
     return "".join("1" if ABECEDARY[i] in activos else "0" for i in range(n_nodos))
-
-
-def _guardar_excel_bloque(ruta_salida: Path, resultados: list) -> None:
-    """Crea el archivo Excel con los resultados del lote."""
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Resultados"
-
-    COLUMNAS = [
-        ("#Prueba",                  10),
-        ("Alcance o Purview (t+1)",  28),
-        ("Mecanismo(t)",             22),
-        ("Particion",                48),
-        ("Perdida",                  16),
-        ("Tiempo",                   20),
-    ]
-
-    hdr_font  = Font(bold=True, color="FFFFFF", size=11)
-    hdr_fill  = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-    hdr_align = Alignment(horizontal="center", vertical="center")
-
-    for col_idx, (titulo, ancho) in enumerate(COLUMNAS, start=1):
-        cell = ws.cell(row=1, column=col_idx, value=titulo)
-        cell.font      = hdr_font
-        cell.fill      = hdr_fill
-        cell.alignment = hdr_align
-        ws.column_dimensions[get_column_letter(col_idx)].width = ancho
-
-    ws.row_dimensions[1].height = 22
-    ws.freeze_panes = "A2"
-
-    center_align = Alignment(horizontal="center", vertical="center")
-    part_align   = Alignment(wrap_text=True, vertical="top", horizontal="left")
-    error_font   = Font(color="CC0000")
-    alt_fill     = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
-
-    for fila_idx, r in enumerate(resultados, start=2):
-        relleno = alt_fill if (fila_idx % 2 == 0) else None
-
-        def _c(col: int, valor, alinear=center_align, fuente=None):
-            c = ws.cell(row=fila_idx, column=col, value=valor)
-            c.alignment = alinear
-            if fuente:
-                c.font = fuente
-            if relleno:
-                c.fill = relleno
-            return c
-
-        _c(1, r.get("#prueba"))
-        _c(2, r.get("alcance_orig", ""))
-        _c(3, r.get("mecanismo_orig", ""))
-
-        if r.get("error"):
-            _c(4, f"ERROR: {r['error']}", alinear=part_align, fuente=error_font)
-            _c(5, None)
-            _c(6, None)
-        else:
-            _c(4, r.get("particion", ""), alinear=part_align)
-            perdida = r.get("perdida_phi")
-            _c(5, round(perdida, 6) if perdida is not None else None)
-            _c(6, r.get("tiempo_formateado", ""))
-
-        ws.row_dimensions[fila_idx].height = 45
-
-    wb.save(ruta_salida)
 
 
 # ── Helpers de escritura incremental ──────────────────────────────────────

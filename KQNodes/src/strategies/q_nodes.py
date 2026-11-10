@@ -68,7 +68,7 @@ Memoización:
 import random as _random_module
 import time
 from itertools import product
-from typing import Generator, Optional
+from typing import Optional
 
 import numpy as np
 
@@ -111,15 +111,6 @@ _CAP_EXACTO: int = 300_000
 
 # Un bloque asimétrico: (frozenset futuros_pos, frozenset presentes_pos).
 Bloque = "tuple[frozenset, frozenset]"
-
-
-def _bits_activos(mascara: int) -> Generator[int, None, None]:
-    """Genera los índices de bits activos de `mascara` en orden ascendente."""
-    m = mascara
-    while m:
-        bit = m & (-m)
-        yield bit.bit_length() - 1
-        m ^= bit
 
 
 class QNodes(SIA):

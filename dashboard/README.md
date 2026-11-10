@@ -1,23 +1,23 @@
-# Dashboard MIP — QNodes & GeoMIP
+# Dashboard MIP — QNodes & KGeoMIP
 
 Interfaz gráfica (React + Vite) para operar y analizar los frameworks de k-MIP
 del repositorio. Permite:
 
-1. **Ejecutar por bloque** QNodes y GeoMIP desde la GUI (orquestando corridas manuales).
+1. **Ejecutar por bloque** QNodes y KGeoMIP desde la GUI (orquestando corridas manuales).
 2. **Explorar resultados guardados** (`results/manual`, `results/manually`, `results/block`).
 3. **Generar métricas** sobre cada resultado: pérdida relativa Φ, crecimiento de la
-   distribución, cohesión por columna/nodo y comparativa QNodes vs GeoMIP.
+   distribución, cohesión por columna/nodo y comparativa QNodes vs KGeoMIP.
 
 ## Arquitectura
 
 ```
 React (Vite, :5173)  ──/api──▶  FastAPI (uvicorn, :8000)
                                    │
-                                   ├─ worker QNodes  (proceso vivo, cwd=QNodes/)
-                                   └─ worker GeoMIP  (proceso vivo, cwd=GeoMIP/)
+                                   ├─ worker QNodes  (proceso vivo, cwd=KQNodes/)
+                                   └─ worker KGeoMIP (proceso vivo, cwd=KGeoMIP/)
 ```
 
-QNodes y GeoMIP usan ambos un paquete `src` de nivel superior, por lo que **no pueden
+QNodes y KGeoMIP usan ambos un paquete `src` de nivel superior, por lo que **no pueden
 convivir en un mismo intérprete**. Cada uno corre en su propio proceso worker
 persistente, precargado al arrancar el backend y anclado a modo manual
 (una corrida — un `aplicar_estrategia` — por petición). El "bloque" de la GUI
@@ -42,7 +42,7 @@ npm run dev
 ```
 
 Abre http://localhost:5173. El indicador "Motores" en la barra lateral muestra
-si los workers QNodes/GeoMIP están listos.
+si los workers QNodes/KGeoMIP están listos.
 
 ## Endpoints principales (backend)
 
@@ -55,7 +55,7 @@ si los workers QNodes/GeoMIP están listos.
 | POST | `/api/block` | Lote (streaming SSE), guarda XLSX. Calienta el motor antes del lote (ver abajo) |
 | GET | `/api/results?algo=&tipo=` | Índice de resultados guardados |
 | GET | `/api/results/detail?ruta=` | Detalle parseado + métricas |
-| GET | `/api/comparativa` | Cruce QNodes vs GeoMIP (resultados manuales) |
+| GET | `/api/comparativa` | Cruce QNodes vs KGeoMIP (resultados manuales) |
 
 ## Arranque del motor (warmup) en el lote
 

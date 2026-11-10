@@ -141,20 +141,16 @@ marginales basta y es O(N).
 
 ---
 
-## Pipeline heurístico legado (fallback)
+## Pipeline heurístico legado (eliminado)
 
 Antes del motor greedy top-down, GeoMIP generaba candidatos con heurísticas
-geométricas. Este pipeline permanece en el código como **fallback** (`_evaluar_k_completo`,
-`_particion_grafo_hipercubo`, `_agrupamiento_jerarquico`) pero **no** es la ruta por
-defecto:
+geométricas (SpectralClustering, AgglomerativeClustering, candidatos de aislamiento
+`C(N, k-1)` y refinamiento 1-move). Ese pipeline se eliminó en 2026-11 por ser código
+muerto: `_evaluar_k_completo`, `_particion_grafo_hipercubo`, `_agrupamiento_jerarquico`
+y la dependencia de scikit-learn ya no forman parte del repositorio.
 
-- **SpectralClustering** sobre la matriz de afinidad `A[i,j] = (1 + cos(col_i,col_j))/2`
-  de la tabla de costos, con varias semillas.
-- **AgglomerativeClustering** (average/complete/single linkage).
-- **Aislamiento heurístico** C(N, k-1) y variantes con mecanismo vacío (centinela -1).
-- Evaluación paralela + refinamiento 1-move.
-
-Si scikit-learn no está disponible, hay un fallback jerárquico bottom-up determinista.
+El motor vigente es **greedy top-down sobre el cut pool + refinamiento 1-move**, con la
+ruta exacta por enumeración para `N ≤ 6`.
 
 ---
 

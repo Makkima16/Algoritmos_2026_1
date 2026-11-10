@@ -2,8 +2,7 @@ import sys
 import logging
 from pathlib import Path
 from datetime import datetime
-from functools import wraps
-from typing import Any, Callable
+from typing import Any
 
 from colorama import init, Fore, Style
 
@@ -154,27 +153,3 @@ class SafeLogger:
     def fatal(self, *args, **kwargs) -> None:
         """Log a nivel FATAL."""
         self.set_log(logging.FATAL, *args, **kwargs)
-
-
-def get_logger(name: str) -> SafeLogger:
-    """Función de conveniencia para obtener una instancia del logger."""
-    return SafeLogger(name)
-
-
-# Decorador opcional para logging automático
-def log_execution(logger: SafeLogger):
-    def decorator(func: Callable):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            try:
-                logger.debug(f"Iniciando {func.__name__}")
-                result = func(*args, **kwargs)
-                logger.debug(f"Completado {func.__name__}")
-                return result
-            except Exception as e:
-                logger.error(f"Error en {func.__name__}: {e}")
-                raise
-
-        return wrapper
-
-    return decorator

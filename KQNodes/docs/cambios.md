@@ -91,8 +91,8 @@ La versión original no tenía mejora post-greedy. La actual añade:
 
 ## 6. Entrada de datos: hardcodeada → interactiva
 
-**Original:** estado, TPM y sistema definidos en `src/main.py`; cambiar de sistema
-exigía editar el código.
+**Original:** estado, TPM y sistema definidos en `src/main.py` (hoy eliminado); cambiar
+de sistema exigía editar el código.
 
 **Actual:** `exec.py` con menú de dos modos:
 - **Modo manual:** ingreso por terminal de estado, candidato, alcance, mecanismo y k.
@@ -283,5 +283,5 @@ bruta (N≤6, det y no-det) salen VERDADERO. TPM no-deterministas verificadas (n
 ## Archivos sin cambios estructurales
 
 - `src/models/core/ncube.py`, `src/models/core/system.py`, `src/models/base/sia.py`
-- `src/strategies/force.py`, `src/strategies/phi.py`
+- `src/strategies/force.py`
 - `src/funcs/format.py` (el formateador `fmt_k_bloques` ya era compatible)

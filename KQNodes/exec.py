@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Script de ejecución interactivo para KQNodes — k-Partición de Mínima Información (DP + B&B)
+Script de ejecución interactivo para KQNodes — k-Partición de Mínima Información (Queyranne + greedy + ILS)
 
 Modos de ejecución:
   1. Manual   — ingreso interactivo de una sola prueba.
@@ -33,7 +33,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 from src.models.base.application import aplicacion
-from src.strategies.q_nodes import DynamicPartition, PERMITIR_PRESENTE_VACIO_POR_DEFECTO
+from src.strategies.q_nodes import DynamicPartition
 from src.funcs.iit import ABECEDARY
 from src.middlewares.profile import gestor_perfilado
 

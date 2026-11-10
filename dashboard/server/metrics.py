@@ -16,7 +16,6 @@ Las 4 familias de métricas responden:
 """
 
 import re
-import math
 
 EPS = 1e-12
 
